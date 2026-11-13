@@ -72,6 +72,7 @@ import {
   type PullRequestThreadCommentsInput,
   type PullRequestThreadCommentsResult,
   type PullRequestStackEditInput,
+  type PullRequestStackEditResult,
   type PullRequestUpdateInput,
   type SourceControlProviderInfo,
   SourceControlProviderKind,
@@ -275,7 +276,7 @@ export class PullRequestService extends Context.Service<
     ) => Effect.Effect<PullRequestSummary | undefined, PullRequestError>;
     readonly editStack: (
       input: PullRequestStackEditInput,
-    ) => Effect.Effect<PullRequestStack | null, PullRequestError>;
+    ) => Effect.Effect<PullRequestStackEditResult, PullRequestError>;
     readonly update: (input: PullRequestUpdateInput) => Effect.Effect<void, PullRequestError>;
     readonly comment: (input: PullRequestCommentInput) => Effect.Effect<void, PullRequestError>;
     readonly updateComment: (
@@ -1910,10 +1911,13 @@ export const make = Effect.gen(function* () {
       Effect.mapError(toPullRequestError("editStack")),
       Effect.ensuring(refreshAfterTurn(project.project.id).pipe(Effect.andThen(resync(known)))),
     );
-    yield* resync(
-      (stack?.layers ?? []).map((layer) => layer.number).filter((n) => !known.includes(n)),
-    );
-    return toStack(stack);
+    const added = (stack?.layers ?? [])
+      .map((layer) => layer.number)
+      .filter((n) => !known.includes(n));
+    yield* resync(added);
+    // Returned so a client that routed the edit here can resync the same layers on the thread's
+    // own environment, which never sees this server's notifications.
+    return { stack: toStack(stack), affected: [...new Set([...known, ...added])] };
   });
 
   const detailUncached: PullRequestService["Service"]["detail"] = (input) =>

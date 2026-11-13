@@ -855,6 +855,14 @@ export const PullRequestStackEditInput = Schema.Struct({
 });
 export type PullRequestStackEditInput = typeof PullRequestStackEditInput.Type;
 
+export const PullRequestStackEditResult = Schema.Struct({
+  /** The stack as the edit left it; null once dissolved. */
+  stack: Schema.NullOr(PullRequestStack),
+  /** Every pull request whose stack the edit may have changed, including the ones it dissolved. */
+  affected: Schema.Array(PositiveInt),
+});
+export type PullRequestStackEditResult = typeof PullRequestStackEditResult.Type;
+
 // Preserve whitespace because it affects Markdown formatting.
 const CommentBody = Schema.String.check(Schema.isNonEmpty()).check(Schema.isMaxLength(65_536));
 

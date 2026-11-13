@@ -203,6 +203,7 @@ import {
   PullRequestRoutingIdentityResult,
   PullRequestStack,
   PullRequestStackEditInput,
+  PullRequestStackEditResult,
   PullRequestLinkedThreadsResult,
   PullRequestSummary,
   PullRequestReviewerCandidateList,
@@ -1182,8 +1183,7 @@ const WsPullRequestsRunActionRpc = Rpc.make(WS_METHODS.pullRequestsRunAction, {
 
 const WsPullRequestsEditStackRpc = Rpc.make(WS_METHODS.pullRequestsEditStack, {
   payload: PullRequestStackEditInput,
-  // The stack as the edit left it; null once dissolved.
-  success: Schema.NullOr(PullRequestStack),
+  success: PullRequestStackEditResult,
   error: PullRequestRpcError,
 });
 

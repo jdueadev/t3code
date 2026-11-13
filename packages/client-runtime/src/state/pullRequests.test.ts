@@ -894,6 +894,9 @@ it.effect(
             Effect.sync(() => {
               mutations.push({ environment, expectedAccountId: input.expectedAccountId });
             }),
+          [WS_METHODS.serverGetConfig]: () => Effect.succeed({ environment: { capabilities: {} } }),
+          [WS_METHODS.pullRequestsEditStack]: () =>
+            Effect.succeed({ stack: null, affected: [7, 8, 9] }),
           [WS_METHODS.pullRequestsInvalidate]: (input: unknown) =>
             Effect.sync(() => {
               invalidations.push({ environment, input });
@@ -927,6 +930,18 @@ it.effect(
             { environment: "local", input: {} },
           ]),
         );
+
+        invalidations.length = 0;
+        yield* route(WS_METHODS.pullRequestsEditStack, {
+          ...reference,
+          edit: { kind: "unstack", stackNumber: 50 },
+        });
+        for (const number of [8, 9]) {
+          expect(invalidations).toContainEqual({
+            environment: "origin",
+            input: { reference: expect.objectContaining({ ...reference, number }) },
+          });
+        }
 
         invalidations.length = 0;
         const refresh = createPullRequestRouter();

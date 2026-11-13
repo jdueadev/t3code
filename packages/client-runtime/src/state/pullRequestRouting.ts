@@ -2,6 +2,7 @@ import {
   WS_METHODS,
   PullRequestRef,
   PullRequestInvalidateInput,
+  PullRequestStackEditResult,
   PullRequestState,
   type EnvironmentId,
   type PullRequestRoutingResult,
@@ -66,6 +67,7 @@ const hasState = Schema.is(
   Schema.Struct({ state: PullRequestState, isDraft: Schema.optional(Schema.Boolean) }),
 );
 const isInvalidation = Schema.is(PullRequestInvalidateInput);
+const isStackEditResult = Schema.is(PullRequestStackEditResult);
 const readTimeout = (environmentId: EnvironmentId) =>
   Effect.timeoutOrElse({
     duration: "30 seconds",
@@ -282,39 +284,58 @@ export function createPullRequestRouter() {
       ref.repository.toLowerCase(),
       String(ref.number),
     ]);
-    const invalidateReaders = Effect.suspend(() => {
-      if (!writes.has(tag) || used.size === 0) return Effect.void;
-      const targets = new Map<EnvironmentId, PullRequestRef[]>([
-        [origin.target.environmentId, [ref]],
-      ]);
-      for (const entry of used.values()) {
-        if (entry.origin !== origin.target.environmentId || !matchesReference(entry.reference, ref))
-          continue;
-        for (const target of [...entry.targets, origin.target.environmentId]) {
-          const refs = targets.get(target) ?? [];
-          if (!refs.some((existing) => existing.host === entry.reference.host))
-            refs.push(entry.reference);
-          targets.set(target, refs);
+    // A stack edit moves every layer, and the server that made it only resyncs its own threads.
+    // Each layer's reference reaches the origin, whose invalidate handler resyncs its saved link.
+    const invalidateReaders = (result?: unknown) =>
+      Effect.suspend(() => {
+        if (!writes.has(tag) || used.size === 0) return Effect.void;
+        const layers =
+          tag === WS_METHODS.pullRequestsEditStack && isStackEditResult(result)
+            ? result.affected.filter((number) => number !== ref.number)
+            : [];
+        const withLayers = (reference: PullRequestRef) => [
+          reference,
+          ...layers.map((number) => ({ ...reference, number })),
+        ];
+        const targets = new Map<EnvironmentId, PullRequestRef[]>([
+          [origin.target.environmentId, withLayers(ref)],
+        ]);
+        for (const entry of used.values()) {
+          if (
+            entry.origin !== origin.target.environmentId ||
+            !matchesReference(entry.reference, ref)
+          )
+            continue;
+          for (const target of [...entry.targets, origin.target.environmentId]) {
+            const refs = targets.get(target) ?? [];
+            if (
+              !refs.some(
+                (existing) =>
+                  existing.host === entry.reference.host && existing.number === ref.number,
+              )
+            )
+              refs.push(...withLayers(entry.reference));
+            targets.set(target, refs);
+          }
         }
-      }
-      return Effect.forEach(
-        targets,
-        ([target, refs]) =>
-          invalidateTarget(registry, origin.target.environmentId, target, [
-            ...refs.map((reference) => ({
-              reference,
-              ...(tag === WS_METHODS.pullRequestsSetFilesViewed ? { filesViewedOnly: true } : {}),
-            })),
-            ...(tag === WS_METHODS.pullRequestsSetFilesViewed ? [] : [{}]),
-          ]),
-        { concurrency: 4, discard: true },
-      );
-    });
+        return Effect.forEach(
+          targets,
+          ([target, refs]) =>
+            invalidateTarget(registry, origin.target.environmentId, target, [
+              ...refs.map((reference) => ({
+                reference,
+                ...(tag === WS_METHODS.pullRequestsSetFilesViewed ? { filesViewedOnly: true } : {}),
+              })),
+              ...(tag === WS_METHODS.pullRequestsSetFilesViewed ? [] : [{}]),
+            ]),
+          { concurrency: 4, discard: true },
+        );
+      });
     // A failed viewed-files batch may have applied some paths. Other writes invalidate on success.
     const finish = (operation: ReturnType<typeof request<T>>) =>
       tag === WS_METHODS.pullRequestsSetFilesViewed
-        ? operation.pipe(Effect.ensuring(invalidateReaders))
-        : operation.pipe(Effect.tap(() => invalidateReaders));
+        ? operation.pipe(Effect.ensuring(invalidateReaders()))
+        : operation.pipe(Effect.tap((result) => invalidateReaders(result)));
     const alternatives = [];
     for (const [id, entry] of entries) {
       if (id === origin.target.environmentId) continue;

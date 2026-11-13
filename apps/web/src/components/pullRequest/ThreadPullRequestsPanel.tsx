@@ -521,16 +521,17 @@ function EnabledThreadPullRequestsPanel({ threadRef }: { threadRef: ScopedThread
       });
       return;
     }
+    const { stack } = result.value;
     toastManager.update(toastId, {
       type: "success",
       title: unstack
         ? "Unstacked"
-        : result.value === null
+        : stack === null
           ? "Stacked"
-          : `Stack #${result.value.number} has ${result.value.layers.length} layers`,
-      ...(unstack && result.value !== null
+          : `Stack #${stack.number} has ${stack.layers.length} layers`,
+      ...(unstack && stack !== null
         ? {
-            description: `${result.value.layers.length} merged or queued layers stay stacked.`,
+            description: `${stack.layers.length} merged or queued layers stay stacked.`,
           }
         : {}),
     });

@@ -102,9 +102,9 @@ export function PullRequestStackMenu({
       type: "success",
       title: "Unstacked",
       description:
-        result.value === null
+        result.value.stack === null
           ? `Stack #${stack.number} is dissolved. Its ${terminology.plural} stay open.`
-          : `${hostLabel} kept ${result.value.layers.length} merged or queued layers stacked.`,
+          : `${hostLabel} kept ${result.value.stack.layers.length} merged or queued layers stacked.`,
     });
   };
   const top = stack.layers.at(-1);

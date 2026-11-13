@@ -3912,7 +3912,10 @@ it.effect.each([false, true])(
       const resynced = yield* Effect.scoped(
         Effect.gen(function* () {
           const changes = yield* service.subscribeStateChanges;
-          assert.strictEqual(yield* service.editStack(unstack), null);
+          assert.deepStrictEqual(yield* service.editStack(unstack), {
+            stack: null,
+            affected: [3, 4],
+          });
           return yield* Stream.runCollect(Stream.take(changes, 2));
         }),
       );
