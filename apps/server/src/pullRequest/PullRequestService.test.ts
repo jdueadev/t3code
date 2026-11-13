@@ -3777,6 +3777,7 @@ it.effect.each([false, true])(
       let stackEdit = true;
       let stackEdited = 0;
       let stackEditFails = false;
+      let stackReadFails = false;
       const capabilities = {
         diff: true,
         comment: true,
@@ -3827,15 +3828,18 @@ it.effect.each([false, true])(
                 if (mutationFails) return yield* requestFailed;
               }),
             getChangeRequestStack: () =>
-              Effect.succeed({
-                id: "50",
-                number: 50,
-                url: "https://github.com/acme/web/stack/50",
-                base: "main",
-                layers: [
-                  { number: 3, headBranch: "a", state: "open" as const },
-                  { number: 4, headBranch: "b", state: "open" as const },
-                ],
+              Effect.gen(function* () {
+                if (stackReadFails) return yield* requestFailed;
+                return {
+                  id: "50",
+                  number: 50,
+                  url: "https://github.com/acme/web/stack/50",
+                  base: "main",
+                  layers: [
+                    { number: 3, headBranch: "a", state: "open" as const },
+                    { number: 4, headBranch: "b", state: "open" as const },
+                  ],
+                };
               }),
             editChangeRequestStack: () =>
               Effect.gen(function* () {
@@ -3901,6 +3905,9 @@ it.effect.each([false, true])(
         (yield* Effect.flip(service.editStack(left)))._tag,
         "PullRequestOperationError",
       );
+      stackReadFails = true;
+      yield* Effect.flip(service.editStack(unstack));
+      stackReadFails = false;
       assert.strictEqual(stackEdited, 0);
       const resynced = yield* Effect.scoped(
         Effect.gen(function* () {
