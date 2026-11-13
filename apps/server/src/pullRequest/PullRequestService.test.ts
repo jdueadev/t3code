@@ -3776,6 +3776,7 @@ it.effect.each([false, true])(
       let stackActions = true;
       let stackEdit = true;
       let stackEdited = 0;
+      let stackEditFails = false;
       const capabilities = {
         diff: true,
         comment: true,
@@ -3837,8 +3838,9 @@ it.effect.each([false, true])(
                 ],
               }),
             editChangeRequestStack: () =>
-              Effect.sync(() => {
+              Effect.gen(function* () {
                 stackEdited++;
+                if (stackEditFails) return yield* requestFailed;
                 return null;
               }),
           }),
@@ -3894,6 +3896,12 @@ it.effect.each([false, true])(
       );
       assert.strictEqual(stackEdited, 0);
       stackEdit = true;
+      const left = { ...unstack, edit: { kind: "unstack" as const, stackNumber: 51 } };
+      assert.strictEqual(
+        (yield* Effect.flip(service.editStack(left)))._tag,
+        "PullRequestOperationError",
+      );
+      assert.strictEqual(stackEdited, 0);
       const resynced = yield* Effect.scoped(
         Effect.gen(function* () {
           const changes = yield* service.subscribeStateChanges;
@@ -3908,6 +3916,18 @@ it.effect.each([false, true])(
       assert.strictEqual(stackEdited, 1);
       yield* service.summary(unrelated);
       assert.strictEqual(summaryReads, 3);
+      stackEditFails = true;
+      const afterLostAnswer = yield* Effect.scoped(
+        Effect.gen(function* () {
+          const changes = yield* service.subscribeStateChanges;
+          yield* Effect.flip(service.editStack(unstack));
+          return yield* Stream.runCollect(Stream.take(changes, 2));
+        }),
+      );
+      assert.deepStrictEqual(
+        Array.from(afterLostAnswer, (key) => key.number),
+        [3, 4],
+      );
     }),
 );
 

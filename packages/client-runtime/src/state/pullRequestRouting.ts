@@ -329,9 +329,15 @@ export function createPullRequestRouter() {
         )
         .pipe(Effect.orElseSucceed(() => Option.none()));
       if (Option.isNone(connected)) continue;
-      if (tag === WS_METHODS.pullRequestsChecks) {
+      const capability =
+        tag === WS_METHODS.pullRequestsChecks
+          ? "pullRequestChecks"
+          : tag === WS_METHODS.pullRequestsEditStack
+            ? "pullRequestStackEdits"
+            : undefined;
+      if (capability !== undefined) {
         const supported = yield* connected.value.initialConfig.pipe(
-          Effect.map((config) => config.environment.capabilities.pullRequestChecks === true),
+          Effect.map((config) => config.environment.capabilities[capability] === true),
           Effect.timeout("2 seconds"),
           Effect.catchCause((cause) =>
             Cause.hasInterrupts(cause) ? Effect.interrupt : Effect.succeed(false),
