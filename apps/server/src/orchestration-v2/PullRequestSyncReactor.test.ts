@@ -2002,6 +2002,24 @@ describe("PullRequestSyncReactor", () => {
       linked: [124, 125],
     },
     {
+      name: "the new layers of a submitted stack, not the one it only retargeted",
+      input: "git push -q; timeout 120 gh stack submit --auto",
+      output: [
+        "Pushing to origin...",
+        "✓ Created PR #124 (https://github.com/owner/repository/pull/124) for a",
+        "✓ Created PR #125 (https://github.com/owner/repository/pull/125) for b",
+        "✓ Updated base branch for PR #120 (https://github.com/owner/repository/pull/120) to a",
+        "✓ Stack created on GitHub with 3 PRs",
+      ].join("\n"),
+      linked: [124, 125],
+    },
+    {
+      name: "a stack command that opens nothing",
+      input: "gh stack view --short",
+      output: "✓ Created PR #124 (https://github.com/owner/repository/pull/124) for a",
+      linked: [],
+    },
+    {
       name: "the first pull request of a new repository",
       input: "cargo test 2>&1 | tail -1 && timeout 60 gh pr create -R owner/repository --fill",
       output: "test result: ok\nhttps://github.com/owner/repository/pull/1",

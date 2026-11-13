@@ -361,3 +361,15 @@ the scope and merge strategy. GitHub rebases the remaining stack after merging.
 It can rewrite history and restart checks. If a layer fails, earlier updates remain; resolve that
 layer before retrying. GitHub may require manual conflict resolution after a lower layer is amended,
 even when its changes look independent. Stack actions require an environment that supports them.
+
+To make a stack, link its pull requests to a thread. In the **Linked pull requests** panel, the row
+menu of the bottom pull request offers **Create stack** when each pull request is open and based on
+the branch of the one below it, and **Add to stack** when they sit on the top layer of an existing
+stack. A stack only grows from its top. **Unstack**, in the same menu and in a review's stack badge,
+dissolves the stack and leaves its pull requests open; merged and queued layers stay stacked. On
+mobile, touch and hold the bottom pull request in the linked list for the same actions; **Unstack**
+is also in a review's stack card. You need write access to the repository.
+
+Agents can manage stacks from a shell with the [`gh stack`](https://gh.io/stacks)
+extension (`gh extension install github/gh-stack`). Pull requests an agent opens with
+`gh stack submit` or `gh stack link` are linked to its thread, and the rest of the stack follows.

@@ -55,6 +55,7 @@ const CAPABILITIES: PullRequestCapabilities = {
   edit: { changeRequest: true, comment: true, maintainerEdits: true },
   stacks: true,
   stackActions: true,
+  stackEdits: true,
   labels: true,
   // Statuses and check runs land on the head commit itself and are read whole, so an empty list
   // after a push is CI that never started rather than a read that saw nothing.
@@ -77,7 +78,7 @@ export function gitHubViewerPermissions(
   access: GitHubViewerAccess & Pick<GitHubRepositoryAccess, "autoMergeAllowed">,
 ): PullRequestViewerPermissions {
   return {
-    ...(access.canWrite ? { stackRebase: true } : {}),
+    ...(access.canWrite ? { stackRebase: true, stackEdit: true } : {}),
     actions: [
       ...(access.canDeleteBranch === true ? (["delete-branch"] as const) : []),
       // Keep disabling available if the repository has since turned auto-merge off.
@@ -737,6 +738,8 @@ export const make = Effect.gen(function* () {
         })
         .pipe(Effect.mapError(fail("runAction"))),
 
+    editChangeRequestStack: (input) =>
+      cli.editPullRequestStack(input).pipe(Effect.mapError(fail("editChangeRequestStack"))),
     updateChangeRequest: (input) =>
       cli
         .updatePullRequest({

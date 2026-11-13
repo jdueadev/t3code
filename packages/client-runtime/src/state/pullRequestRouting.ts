@@ -50,6 +50,7 @@ const reads = new Set<string>([
 const writes = new Set<string>([
   WS_METHODS.pullRequestsSetFilesViewed,
   WS_METHODS.pullRequestsRunAction,
+  WS_METHODS.pullRequestsEditStack,
   WS_METHODS.pullRequestsUpdate,
   WS_METHODS.pullRequestsComment,
   WS_METHODS.pullRequestsUpdateComment,

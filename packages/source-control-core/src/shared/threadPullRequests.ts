@@ -352,11 +352,86 @@ export function makeThreadPullRequests(
   };
 }
 
+/** `link` numbers run bottom to top; with `stackNumber` they start at that stack's top layer. */
+export type PullRequestStackEdit =
+  | {
+      readonly kind: "link";
+      readonly numbers: ReadonlyArray<number>;
+      readonly stackNumber?: number;
+    }
+  | { readonly kind: "unstack"; readonly stackNumber: number };
+
+export function pullRequestStackEditLabel(edit: PullRequestStackEdit): string {
+  if (edit.kind === "unstack") return `Unstack #${edit.stackNumber}`;
+  return edit.stackNumber === undefined
+    ? `Create stack of ${edit.numbers.length}`
+    : `Add to stack #${edit.stackNumber}`;
+}
+
 export interface PullRequestListLine {
   readonly link: ThreadPullRequestLink;
   readonly depth: number;
   readonly chainKey: string;
   readonly stack: { readonly kind: ThreadPullRequestChain["kind"]; readonly size: number } | null;
+  /** On a chain's bottom line: how a host with editable stacks could change it. */
+  readonly stackEdit: PullRequestStackEdit | null;
+}
+
+function sameRepository(left: ThreadPullRequestLink, right: ThreadPullRequestLink): boolean {
+  return (
+    left.host.toLowerCase() === right.host.toLowerCase() &&
+    left.repository.toLowerCase() === right.repository.toLowerCase()
+  );
+}
+
+/** Members' saved stacks can lag one another; the one covering most members is the newest. */
+function nativeStackOf(chain: ThreadPullRequestChain) {
+  const members = new Set(chain.layers.map((link) => link.number));
+  let best = chain.layers[0]!.stack!;
+  let bestCoverage = -1;
+  for (const { stack } of chain.layers) {
+    if (stack === null) continue;
+    const coverage = stack.layers.filter((layer) => members.has(layer.number)).length;
+    if (
+      coverage > bestCoverage ||
+      (coverage === bestCoverage && stack.layers.length > best.layers.length)
+    ) {
+      best = stack;
+      bestCoverage = coverage;
+    }
+  }
+  return best;
+}
+
+function stackEditOf(
+  chain: ThreadPullRequestChain,
+  chains: ReadonlyArray<ThreadPullRequestChain>,
+): PullRequestStackEdit | null {
+  const bottom = chain.layers[0]!;
+  if (chain.kind === "native") {
+    const stack = nativeStackOf(chain);
+    return stack.layers.some((layer) => layer.state === "open")
+      ? { kind: "unstack", stackNumber: stack.number }
+      : null;
+  }
+  // A host stack is one line of open change requests, each based on the one below.
+  if (
+    chain.layers.some(
+      (link, index) => link.snapshot?.state !== "open" || chain.depths[index] !== index,
+    )
+  ) {
+    return null;
+  }
+  const numbers = chain.layers.map((link) => link.number);
+  for (const other of chains) {
+    if (other.kind !== "native" || !sameRepository(other.layers[0]!, bottom)) continue;
+    const stack = nativeStackOf(other);
+    const top = stack.layers[stack.layers.length - 1];
+    if (top?.state === "open" && top.headBranch === bottom.snapshot!.baseBranch) {
+      return { kind: "link", stackNumber: stack.number, numbers: [top.number, ...numbers] };
+    }
+  }
+  return numbers.length > 1 ? { kind: "link", numbers } : null;
 }
 
 function chainKeyOf(chain: ThreadPullRequestChain): string {
@@ -364,8 +439,10 @@ function chainKeyOf(chain: ThreadPullRequestChain): string {
   return `${bottom.host}/${bottom.repository}#${bottom.number}`;
 }
 
+/** `all` is every chain of the thread when `chains` is a part of them, for edits across parts. */
 export function pullRequestListLines(
   chains: ReadonlyArray<ThreadPullRequestChain>,
+  all: ReadonlyArray<ThreadPullRequestChain> = chains,
 ): ReadonlyArray<PullRequestListLine> {
   const ordered = [...chains].sort(
     (left, right) =>
@@ -382,6 +459,7 @@ export function pullRequestListLines(
         index === 0 && chain.layers.length > 1
           ? { kind: chain.kind, size: chain.layers.length }
           : null,
+      stackEdit: index === 0 ? stackEditOf(chain, all) : null,
     }));
   });
 }

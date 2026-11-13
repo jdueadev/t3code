@@ -71,6 +71,7 @@ import {
   type PullRequestThreadResolutionInput,
   type PullRequestThreadCommentsInput,
   type PullRequestThreadCommentsResult,
+  type PullRequestStackEditInput,
   type PullRequestUpdateInput,
   type SourceControlProviderInfo,
   SourceControlProviderKind,
@@ -93,6 +94,7 @@ import {
   type ProviderFilterOptionPage,
   type ProviderListCursor,
   type ProviderChangeRequestSummary,
+  type ProviderChangeRequestStack,
   type ProviderChangeRequestWatchFingerprint,
   type PullRequestProviderApi,
   PullRequestProviderError,
@@ -271,6 +273,9 @@ export class PullRequestService extends Context.Service<
     readonly runAction: (
       input: PullRequestActionInput,
     ) => Effect.Effect<PullRequestSummary | undefined, PullRequestError>;
+    readonly editStack: (
+      input: PullRequestStackEditInput,
+    ) => Effect.Effect<PullRequestStack | null, PullRequestError>;
     readonly update: (input: PullRequestUpdateInput) => Effect.Effect<void, PullRequestError>;
     readonly comment: (input: PullRequestCommentInput) => Effect.Effect<void, PullRequestError>;
     readonly updateComment: (
@@ -622,6 +627,11 @@ function withRateLimitBackoff(
       ? {}
       : { getFileRevisions: wrap("getFileRevisions", api.getFileRevisions) }),
     runAction: interactive("runAction", api.runAction),
+    ...(api.editChangeRequestStack === undefined
+      ? {}
+      : {
+          editChangeRequestStack: interactive("editChangeRequestStack", api.editChangeRequestStack),
+        }),
     ...(api.updateChangeRequest === undefined
       ? {}
       : {
@@ -1815,6 +1825,22 @@ export const make = Effect.gen(function* () {
       }),
     );
 
+  const toStack = (stack: ProviderChangeRequestStack | null): PullRequestStack | null =>
+    stack === null
+      ? null
+      : {
+          id: stack.id,
+          number: stack.number,
+          url: stack.url,
+          base: stack.base,
+          layers: stack.layers.map((layer) => ({
+            ...layer,
+            number: layer.number,
+            headBranch: layer.headBranch,
+            state: layer.state,
+          })),
+        };
+
   const stackUncached: PullRequestService["Service"]["stack"] = (input, options) =>
     requireProject(input).pipe(
       Effect.flatMap((project) => {
@@ -1826,25 +1852,62 @@ export const make = Effect.gen(function* () {
           host: project.host,
           number: input.number,
           includeDetails: options?.includeDetails !== false,
-        }).pipe(
-          Effect.mapError(toPullRequestError("stack")),
-          Effect.map((stack): PullRequestStack | null =>
-            stack === null
-              ? null
-              : {
-                  id: stack.id,
-                  number: stack.number,
-                  url: stack.url,
-                  base: stack.base,
-                  layers: stack.layers.map((layer) => ({
-                    ...layer,
-                    number: layer.number,
-                    headBranch: layer.headBranch,
-                    state: layer.state,
-                  })),
-                },
-          ),
-        );
+        }).pipe(Effect.mapError(toPullRequestError("stack")), Effect.map(toStack));
+      }),
+    );
+
+  const editStack: PullRequestService["Service"]["editStack"] = (input) =>
+    requireProject(input).pipe(
+      Effect.flatMap((project) => {
+        const edit = project.api.editChangeRequestStack;
+        if (project.api.capabilities.stackEdits !== true || edit === undefined) {
+          return Effect.fail(
+            new PullRequestOperationError({
+              operation: "editStack",
+              detail: "This host cannot change a stack.",
+            }),
+          );
+        }
+        return Effect.gen(function* () {
+          const viewer = yield* viewerPermissionsOf(project, input, "editStack");
+          if (viewer.stackEdit !== true) {
+            return yield* new PullRequestOperationError({
+              operation: "editStack",
+              detail: "You need write access to this repository to change its stacks.",
+            });
+          }
+          // A dissolved stack answers with nothing, so its layers are read before it goes.
+          const before =
+            input.edit.kind === "unstack"
+              ? yield* stackUncached(input, { includeDetails: false }).pipe(
+                  Effect.orElseSucceed(() => null),
+                )
+              : null;
+          const stack = yield* edit({
+            cwd: project.project.workspaceRoot,
+            repository: project.repository,
+            host: project.host,
+            edit: input.edit,
+          }).pipe(
+            Effect.mapError(toPullRequestError("editStack")),
+            Effect.ensuring(refreshAfterTurn(project.project.id)),
+          );
+          // Every layer's membership moved, so each linked one is read again.
+          yield* Effect.forEach(
+            new Set([
+              ...(input.edit.kind === "link" ? input.edit.numbers : [input.number]),
+              ...[...(before?.layers ?? []), ...(stack?.layers ?? [])].map((layer) => layer.number),
+            ]),
+            (number) =>
+              PubSub.publish(stateChanges, {
+                host: project.host,
+                repository: project.repository,
+                number,
+              }),
+            { discard: true },
+          );
+          return toStack(stack);
+        });
       }),
     );
 
@@ -3917,6 +3980,7 @@ export const make = Effect.gen(function* () {
       Cache.get(changeBreakdownCache, refCacheKey(input)),
     ),
     runAction: runActionAndInvalidate,
+    editStack,
     update: invalidatedByMutation(update),
     comment: invalidatedByMutation(comment),
     updateComment: invalidatedByMutation(updateComment),

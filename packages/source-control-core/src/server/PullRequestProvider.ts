@@ -504,6 +504,19 @@ export interface PullRequestProviderApi {
     },
   ) => Effect.Effect<ProviderChangeRequestSummary | void, PullRequestProviderError>;
 
+  /**
+   * `link` takes change requests bottom to top: a new stack when none is stacked, otherwise the
+   * ones above the existing stack's top are added to it. Returns the stack as the edit left it,
+   * or null once dissolved.
+   */
+  readonly editChangeRequestStack?: (
+    input: ProviderRepositoryRef & {
+      readonly edit:
+        | { readonly kind: "link"; readonly numbers: ReadonlyArray<number> }
+        | { readonly kind: "unstack"; readonly stackNumber: number };
+    },
+  ) => Effect.Effect<ProviderChangeRequestStack | null, PullRequestProviderError>;
+
   /** Requires edit capability and at least one field. */
   readonly updateChangeRequest?: (
     input: ProviderRepositoryRef & {

@@ -1,7 +1,11 @@
 import { isCommitSha, normalizeHost } from "@t3tools/source-control-core/server/pullRequestUtils";
 import { removeAgentCredits } from "@t3tools/source-control-core/server/mergeMessage";
 import { KnownWorkflowRuns, makeChecksRevalidator } from "./gitHubConditionalChecks.ts";
-import { runGitHubStackAction, type GitHubStackActionError } from "./githubStackActions.ts";
+import {
+  editGitHubStack,
+  runGitHubStackAction,
+  type GitHubStackActionError,
+} from "./githubStackActions.ts";
 import * as Cache from "effect/Cache";
 import * as Context from "effect/Context";
 import * as Clock from "effect/Clock";
@@ -564,6 +568,13 @@ export class GitHubPullRequestApi extends Context.Service<
       readonly repository: string;
       readonly host: string;
       readonly number: number;
+    }) => Effect.Effect<GitHubPullRequestStack | null, GitHubPullRequestApiError>;
+
+    readonly editPullRequestStack: (input: {
+      readonly cwd: string;
+      readonly repository: string;
+      readonly host: string;
+      readonly edit: Parameters<typeof editGitHubStack>[0]["edit"];
     }) => Effect.Effect<GitHubPullRequestStack | null, GitHubPullRequestApiError>;
 
     readonly getPullRequestActivity: (input: {
@@ -2129,6 +2140,10 @@ export const make = Effect.gen(function* () {
         }),
       );
     }),
+
+    editPullRequestStack: Effect.fn("GitHubPullRequestApi.editPullRequestStack")((input) =>
+      editGitHubStack(input).pipe(Effect.provideService(GitHubRest.GitHubRest, api)),
+    ),
 
     getPullRequestActivity: Effect.fn("GitHubPullRequestApi.getPullRequestActivity")(
       function* (input) {

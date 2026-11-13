@@ -123,10 +123,16 @@ export const definition = defineSourceControl({
     "revert",
     "approve-workflows",
   ] as const),
+  changeRequestStackEdits: true,
   checkoutCommand: ({ number }) => `gh pr checkout ${number}`,
   changeRequestCloseCommand: /\bgh\s+(?:pr\s+(?:merge|close)|stack\s+merge)\b/u,
   // `new` is gh's alias for `create`.
   changeRequestCreateCommand: /\bgh\s+pr\s+(?:create|new)\b/u,
+  // gh-stack reports each one as `Created PR #12 (https://github.com/owner/name/pull/12) for ...`.
+  changeRequestStackCreateCommand: {
+    command: /\bgh\s+stack\s+(?:submit|link)\b/u,
+    created: /\bCreated PR #\d+ \((https?:\/\/[^\s)]+)\)/gu,
+  },
   authorProfileUrl: (login, repositoryUrl) =>
     login.endsWith("[bot]")
       ? null
