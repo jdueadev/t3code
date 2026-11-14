@@ -861,31 +861,45 @@ it.layer(NodeServices.layer)("AgentSessionScanner", (it) => {
       }),
     );
 
-    it.effect("excludes the home directory, temporary root, and T3 data directory", () =>
-      Effect.gen(function* () {
-        const path = yield* Path.Path;
-        const claudeHomePath = yield* makeTempDir("t3code-claude-home-");
-        const codexHomePath = yield* makeTempDir("t3code-codex-home-");
-        const configBaseDir = yield* makeTempDir("t3code-scanner-base-");
-        const workspace = yield* makeTempDir("t3code-workspace-");
+    it.effect(
+      "excludes the home directory, temporary root, T3 data directory, and Claude Desktop scratch folders",
+      () =>
+        Effect.gen(function* () {
+          const path = yield* Path.Path;
+          const fileSystem = yield* FileSystem.FileSystem;
+          const claudeHomePath = yield* makeTempDir("t3code-claude-home-");
+          const codexHomePath = yield* makeTempDir("t3code-codex-home-");
+          const configBaseDir = yield* makeTempDir("t3code-scanner-base-");
+          const workspace = yield* makeTempDir("t3code-workspace-");
+          const claudeDesktopScratch = path.join(
+            yield* makeTempDir("t3code-appdata-"),
+            "Claude-Data",
+            "anthropicpbc.claude_test",
+            "scratch-workspaces",
+            "account",
+            "organization",
+            "scratch-2026-11-11-2be8e4",
+          );
+          yield* fileSystem.makeDirectory(claudeDesktopScratch, { recursive: true });
 
-        for (const [index, cwd] of [
-          NodeOS.homedir(),
-          NodeOS.tmpdir(),
-          configBaseDir,
-          workspace,
-        ].entries()) {
-          yield* writeTranscript({
-            filePath: path.join(claudeHomePath, "projects", `-slug-${index}`, "session.jsonl"),
-            contents: claudeSessionLine(cwd),
-            mtimeMs: Date.parse("2026-01-01T00:00:00.000Z") + index,
-          });
-        }
+          for (const [index, cwd] of [
+            NodeOS.homedir(),
+            NodeOS.tmpdir(),
+            configBaseDir,
+            claudeDesktopScratch,
+            workspace,
+          ].entries()) {
+            yield* writeTranscript({
+              filePath: path.join(claudeHomePath, "projects", `-slug-${index}`, "session.jsonl"),
+              contents: claudeSessionLine(cwd),
+              mtimeMs: Date.parse("2026-01-01T00:00:00.000Z") + index,
+            });
+          }
 
-        const result = yield* runScan({ claudeHomePath, codexHomePath, configBaseDir });
+          const result = yield* runScan({ claudeHomePath, codexHomePath, configBaseDir });
 
-        expect(result.candidates.map((candidate) => candidate.path)).toEqual([workspace]);
-      }),
+          expect(result.candidates.map((candidate) => candidate.path)).toEqual([workspace]);
+        }),
     );
 
     it.effect("excludes T3-managed worktree sandboxes", () =>

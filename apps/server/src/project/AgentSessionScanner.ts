@@ -746,6 +746,13 @@ function isT3ManagedWorktree(
   );
 }
 
+// Claude Desktop runs sessions started without a folder in a per-session throwaway directory.
+const CLAUDE_DESKTOP_SCRATCH_PATTERN = /\/claude[^/]*\/(?:[^/]+\/)?scratch-workspaces\//i;
+
+function isClaudeDesktopScratch(candidatePath: string): boolean {
+  return CLAUDE_DESKTOP_SCRATCH_PATTERN.test(normalizeForWorktreeMatch(candidatePath, false));
+}
+
 // false stops metadata scanning for an excluded rollout, even if later records contain a cwd.
 function extractCwd(line: string, source: AgentSessionSource): string | null | false {
   let parsed: unknown;
@@ -862,7 +869,8 @@ export const make = Effect.gen(function* () {
     normalizeForWorktreeMatch(candidatePath, foldWorktreeCase).startsWith(
       normalizeForWorktreeMatch(baseDir, foldWorktreeCase),
     ) ||
-    isT3ManagedWorktree(candidatePath, worktreesDir, foldWorktreeCase);
+    isT3ManagedWorktree(candidatePath, worktreesDir, foldWorktreeCase) ||
+    isClaudeDesktopScratch(candidatePath);
 
   const listDirectory = (directory: string) =>
     fileSystem.readDirectory(directory).pipe(Effect.orElseSucceed((): ReadonlyArray<string> => []));
