@@ -46,7 +46,10 @@ import * as Orchestrator from "./orchestration-v2/Orchestrator.ts";
 import * as ProjectionStore from "./orchestration-v2/ProjectionStore.ts";
 import * as ProviderSessionManager from "./orchestration-v2/ProviderSessionManager.ts";
 import { threadHasQueuedTurnStart } from "./orchestration-v2/ThreadSettlementService.ts";
-import { MAX_OVERDUE_ARM_MS } from "./orchestration-v2/UsageLimitRecoveryWorker.ts";
+import {
+  MAX_OVERDUE_ARM_MS,
+  limitAutoResume,
+} from "./orchestration-v2/UsageLimitRecoveryWorker.ts";
 import { forkParked } from "./serverActivation.ts";
 import * as Settings from "./serverSettings.ts";
 import * as TerminalManager from "./terminal/Manager.ts";
@@ -144,7 +147,7 @@ function sameProjectWorktreePolicies(left: ServerSettings, right: ServerSettings
 
 type LimitRecoverySettings = Pick<
   ServerSettings,
-  "autoResumeLimitedThreads" | "snoozeLimitedThreads"
+  "autoResumeLimitedThreads" | "snoozeLimitedThreads" | "usageLimitRouting"
 >;
 
 export function storageCleanupThreadIdle(
@@ -204,7 +207,7 @@ function heldForLimitRecovery(
     now - resetMs > MAX_OVERDUE_ARM_MS
   )
     return false;
-  return settings.autoResumeLimitedThreads || (settings.snoozeLimitedThreads && resetMs > now);
+  return limitAutoResume(settings) || (settings.snoozeLimitedThreads && resetMs > now);
 }
 
 /** PR metadata refreshes must not reset the inactivity clock. */
@@ -844,6 +847,52 @@ const make = Effect.gen(function* () {
     return file === undefined ? null : `has ignored files (${file})`;
   });
 
+  // The kept branch still names its commits, but work no remote has must not lose its checkout.
+  const unpushedReason = Effect.fn("StorageCleanup.unpushedReason")(function* (
+    cwd: string,
+    branch: string | null,
+  ) {
+    const remotes = yield* git.execute({
+      operation: "StorageCleanup.unpushed",
+      cwd,
+      args: ["remote"],
+    });
+    const others =
+      remotes.stdout.trim() !== ""
+        ? ["--remotes"]
+        : branch === null
+          ? ["--branches"]
+          : // `--branches` matches exclusions against the name below refs/heads/.
+            [`--exclude=${branch}`, "--branches"];
+    const result = yield* git.execute({
+      operation: "StorageCleanup.unpushed",
+      cwd,
+      args: ["rev-list", "--max-count=1", "HEAD", "--not", ...others],
+    });
+    const commit = result.stdout.trim();
+    if (commit === "") return null;
+    return remotes.stdout.trim() !== ""
+      ? `has commits no remote has (${commit.slice(0, 12)})`
+      : `has commits no other branch has (${commit.slice(0, 12)})`;
+  });
+
+  // A process working inside the folder would be left running in a half removed checkout.
+  const occupiedReason = Effect.fn("StorageCleanup.occupiedReason")(function* (
+    worktreePath: string,
+  ) {
+    const occupants = yield* git.worktreeOccupants(worktreePath);
+    if (occupants === null) return { occupants, reason: "running processes could not be checked" };
+    if (occupants.length === 0) return { occupants, reason: null };
+    const named = occupants
+      .slice(0, 3)
+      .map((occupant) => `pid ${occupant.pid} ${occupant.name}`)
+      .join(", ");
+    return {
+      occupants,
+      reason: `${occupants.length === 1 ? "a process runs" : `${occupants.length} processes run`} from inside it (${named})`,
+    };
+  });
+
   const submoduleRemoval = Effect.fn("StorageCleanup.submoduleRemoval")(
     function* (cwd: string, rules: WorktreeCleanupRules) {
       const inspect = (args: string[], maxOutputBytes = 64 * 1024) =>
@@ -1346,6 +1395,7 @@ const make = Effect.gen(function* () {
           return (
             currentSettings.autoResumeLimitedThreads !== serverSettings.autoResumeLimitedThreads ||
             currentSettings.snoozeLimitedThreads !== serverSettings.snoozeLimitedThreads ||
+            limitAutoResume(currentSettings) !== limitAutoResume(serverSettings) ||
             Object.keys(settings).some(
               (key) =>
                 current[key as keyof typeof settings] !== settings[key as keyof typeof settings],
@@ -1372,6 +1422,8 @@ const make = Effect.gen(function* () {
                 (yield* blockedSinceCheck());
               if (blockedWhileMeasuring !== null) return keep(blockedWhileMeasuring);
               if (yield* settingsChangedSinceCheck) return keep("settings changed since check");
+              const occupied = yield* occupiedReason(worktreePath);
+              if (occupied.reason !== null) return keep(occupied.reason);
               yield* fs.remove(worktreePath, { recursive: true });
               entries.push({
                 ...entry,
@@ -1496,6 +1548,10 @@ const make = Effect.gen(function* () {
             return keep(integrated ? notDueReason : "has commits beyond the project branch");
         }
         if (!eligible) return keep(notDueReason);
+        // A merged pull request landed the work, even when its squashed commits are gone.
+        const landed = removalReason === "pull request was merged";
+        const unpushed = landed ? null : yield* unpushedReason(worktreePath, thread.branch);
+        if (unpushed !== null) return keep(unpushed);
         const blocked = yield* blockedSinceCheck();
         if (blocked !== null) return keep(blocked);
         // Inspect before the lease; provider startup must not wait for directory traversal.
@@ -1528,10 +1584,17 @@ const make = Effect.gen(function* () {
               const changes = yield* localChangesReason(worktreePath, settings);
               if (changes !== null) return keep(changes);
             }
+            const finalUnpushed = landed
+              ? null
+              : yield* unpushedReason(worktreePath, thread.branch);
+            if (finalUnpushed !== null) return keep(finalUnpushed);
+            const occupied = yield* occupiedReason(worktreePath);
+            if (occupied.reason !== null) return keep(occupied.reason);
             yield* removeLinkedWorktree({
               operation: "StorageCleanup.cleanupGit",
               cwd: project.workspaceRoot,
               worktreePath,
+              findOccupants: () => Effect.succeed(occupied.occupants),
               // Git requires force for submodules; recursive checks above cannot make removal atomic.
               force: submodules.force,
               execute: git.execute,
