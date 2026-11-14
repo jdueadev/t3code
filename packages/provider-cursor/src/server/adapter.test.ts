@@ -928,6 +928,7 @@ describe("CursorAdapterV2", () => {
                       })),
                     ),
                     cancel: Deferred.succeed(ended, "cancelled"),
+                    steer: () => Effect.succeed("complete_delivered" as const),
                   };
                 }),
             }),
@@ -989,6 +990,7 @@ describe("CursorAdapterV2", () => {
         },
       });
       const firstPrompt = "Write me a 1000 word story about a dog.";
+      const liveSteer = "Make it rhyme.";
       const steerText = "No wait, a pig please.";
 
       yield* runtime.startTurn(turnInput(1, firstPrompt));
@@ -999,16 +1001,34 @@ describe("CursorAdapterV2", () => {
         ),
       );
       assert(started.type === "provider_turn.updated");
+      yield* runtime.steerTurn({
+        threadId,
+        runId: RunId.make("cursor-steer-run-1"),
+        providerThread,
+        providerTurnId: started.providerTurn.id,
+        message: {
+          messageId: MessageId.make("cursor-steer-live"),
+          createdBy: "user",
+          creationSource: "web",
+          text: liveSteer,
+          attachments: [],
+        },
+      });
       yield* runtime.interruptTurn({ providerThread, providerTurnId: started.providerTurn.id });
       yield* runtime.startTurn(turnInput(2, steerText));
 
       assert.lengthOf(sentMessages, 2);
       const steered = sentMessages[1]!;
-      assert.include(steered, steerText);
-      assert.include(
-        steered,
-        firstPrompt,
-        "the interrupted prompt is missing from the run that replaces it",
+      const order = [firstPrompt, liveSteer, steerText].map((text) => steered.indexOf(text));
+      assert.notInclude(
+        order,
+        -1,
+        "a message the interrupted run took is missing from its replacement",
+      );
+      assert.deepEqual(
+        order,
+        order.toSorted((a, b) => a - b),
+        "messages keep the order they were sent",
       );
 
       yield* Deferred.succeed(runEnds[1]!, "finished");
