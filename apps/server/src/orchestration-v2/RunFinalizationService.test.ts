@@ -2,6 +2,9 @@ import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, it } from "@effect/vitest";
 import {
   CheckpointScopeId,
+  DEFAULT_SERVER_SETTINGS,
+  type GitRunStackedActionInput,
+  type GitRunStackedActionResult,
   ProjectId,
   RunId,
   ThreadId,
@@ -18,12 +21,14 @@ import * as Option from "effect/Option";
 import * as PubSub from "effect/PubSub";
 import * as TestClock from "effect/testing/TestClock";
 
+import * as GitManager from "../git/GitManager.ts";
 import * as ProcessRunner from "../processRunner.ts";
 import * as ProjectEnrichment from "../project/ProjectEnrichmentService.ts";
 import * as ProjectFaviconResolver from "../project/ProjectFaviconResolver.ts";
 import * as ProjectService from "../project/ProjectService.ts";
 import * as RepositoryIdentityResolver from "../project/RepositoryIdentityResolver.ts";
 import * as PullRequestService from "../pullRequest/PullRequestService.ts";
+import * as ServerSettings from "../serverSettings.ts";
 import * as VcsStatusBroadcaster from "../vcs/VcsStatusBroadcaster.ts";
 import * as WorkspaceEntries from "../workspace/WorkspaceEntries.ts";
 import * as CheckpointCapture from "./CheckpointCaptureService.ts";
@@ -395,4 +400,84 @@ it.effect("returns from the post-turn refresh while the identity resolver is sti
     const change = yield* PubSub.take(changes);
     assert.strictEqual(change.enrichment.repositoryIdentity?.canonicalKey, identity.canonicalKey);
   }).pipe(Effect.scoped, Effect.provide(layerIdentityRefresh(workspaceRoot, resolver)));
+});
+
+it.effect("hands a run's leftover thread-worktree changes to auto-commit", () => {
+  const threadId = ThreadId.make("thread-dirty-worktree");
+  const runId = RunId.make("completed-run");
+  const handed = Deferred.makeUnsafe<string>();
+  const layer = RunFinalization.layerObserver.pipe(
+    Layer.provide(
+      Layer.mergeAll(
+        layerNoProject,
+        Layer.succeed(RunFinalization.ThreadWorktreeAutoCommit, {
+          afterRun: ({ cwd }) => Deferred.succeed(handed, cwd).pipe(Effect.asVoid),
+        }),
+        Layer.mock(WorkspaceEntries.WorkspaceEntries)({ refresh: () => Effect.void }),
+        Layer.mock(PullRequestService.PullRequestService)({ refreshAfterTurn: () => Effect.void }),
+        Layer.mock(VcsStatusBroadcaster.VcsStatusBroadcaster)({
+          refreshLocalStatus: () =>
+            Effect.succeed({
+              isRepo: true,
+              hasPrimaryRemote: true,
+              isDefaultRef: false,
+              refName: "feature",
+              hasWorkingTreeChanges: true,
+              workingTree: { files: [], insertions: 0, deletions: 0 },
+            }),
+          refreshPullRequestStatus: () => Effect.succeed(null),
+        }),
+        Layer.mock(ProjectionStore.ProjectionStoreV2)({
+          getThreadShell: () =>
+            Effect.succeed({
+              id: threadId,
+              branch: "feature",
+              worktreePath: "/repo/.wt/feature",
+              activeRunId: null,
+            } as OrchestrationV2ThreadShell),
+        }),
+      ),
+    ),
+  );
+  return Effect.gen(function* () {
+    const observer = yield* RunFinalization.RunFinalizationObserver;
+    yield* observer.refresh({ cwd: "/repo/.wt/feature", threadId, runId });
+    assert.equal(yield* Deferred.await(handed), "/repo/.wt/feature");
+  }).pipe(Effect.provide(layer));
+});
+
+it.effect.each([
+  { label: "leaves the worktree alone by default", enabled: undefined, expected: [] },
+  { label: "commits on the thread branch when turned on", enabled: true, expected: ["commit"] },
+] as const)("auto-commit $label", ({ enabled, expected }) => {
+  const actions: Array<GitRunStackedActionInput["action"]> = [];
+  const layer = RunFinalization.layerThreadWorktreeAutoCommit.pipe(
+    Layer.provide(
+      Layer.mergeAll(
+        Layer.mock(GitManager.GitManager)({
+          runStackedAction: (input) =>
+            Effect.sync(() => {
+              actions.push(input.action);
+              return {} as GitRunStackedActionResult;
+            }),
+        }),
+        Layer.mock(ServerSettings.ServerSettingsService)({
+          getSettings: Effect.succeed(
+            enabled === undefined
+              ? DEFAULT_SERVER_SETTINGS
+              : { ...DEFAULT_SERVER_SETTINGS, autoCommitThreadWorktrees: enabled },
+          ),
+        }),
+      ),
+    ),
+  );
+  return Effect.gen(function* () {
+    const autoCommit = yield* RunFinalization.ThreadWorktreeAutoCommit;
+    yield* autoCommit.afterRun({
+      cwd: "/repo/.wt/feature",
+      threadId: ThreadId.make("thread-auto-commit"),
+      runId: RunId.make("completed-run"),
+    });
+    assert.deepEqual(actions, [...expected]);
+  }).pipe(Effect.provide(layer));
 });

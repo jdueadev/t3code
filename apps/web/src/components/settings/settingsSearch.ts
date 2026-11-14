@@ -815,6 +815,13 @@ export const SETTINGS_SEARCH_ITEMS = [
     searchTerms: ["new worktrees start remote origin latest fetched branch local"],
   },
   {
+    id: "auto-commit-thread-worktrees",
+    title: "Commit thread worktrees automatically",
+    to: "/settings/worktrees",
+    scope: "environment-defaults",
+    searchTerms: ["auto commit uncommitted changes run end thread branch worktree"],
+  },
+  {
     id: "add-project-starts-in",
     title: "Add project starts in",
     to: "/settings/threads",

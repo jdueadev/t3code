@@ -6,9 +6,13 @@ import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 
+import { hasUncommittedThreadWork } from "@t3tools/shared/git";
+
+import * as GitManager from "../git/GitManager.ts";
 import * as ProjectEnrichment from "../project/ProjectEnrichmentService.ts";
 import * as ProjectService from "../project/ProjectService.ts";
 import * as PullRequestService from "../pullRequest/PullRequestService.ts";
+import * as ServerSettings from "../serverSettings.ts";
 import * as VcsStatusBroadcaster from "../vcs/VcsStatusBroadcaster.ts";
 import * as WorkspaceEntries from "../workspace/WorkspaceEntries.ts";
 import * as CheckpointCapture from "./CheckpointCaptureService.ts";
@@ -40,6 +44,48 @@ export class RunFinalizationObserver extends Context.Reference<{
 }>("t3/orchestration-v2/RunFinalizationObserver", {
   defaultValue: () => ({ refresh: () => Effect.void, refreshAfterTurn: () => Effect.void }),
 }) {}
+
+/** Commits a run's leftover thread-worktree changes when the user turned that on; off by default. */
+export class ThreadWorktreeAutoCommit extends Context.Reference<{
+  readonly afterRun: (input: {
+    readonly cwd: string;
+    readonly threadId: ThreadId;
+    readonly runId: RunId;
+  }) => Effect.Effect<void>;
+}>("t3/orchestration-v2/ThreadWorktreeAutoCommit", {
+  defaultValue: () => ({ afterRun: () => Effect.void }),
+}) {}
+
+export const layerThreadWorktreeAutoCommit = Layer.effect(
+  ThreadWorktreeAutoCommit,
+  Effect.gen(function* () {
+    const gitManager = yield* GitManager.GitManager;
+    const settings = yield* ServerSettings.ServerSettingsService;
+    return {
+      afterRun: Effect.fn("RunFinalizationService.autoCommitThreadWorktree")(
+        function* ({ cwd, threadId, runId }) {
+          if (!(yield* settings.getSettings).autoCommitThreadWorktrees) return;
+          yield* gitManager.runStackedAction({
+            actionId: `auto-commit:${runId}`,
+            cwd,
+            action: "commit",
+            threadId,
+          });
+        },
+        (effect, { cwd, threadId }) =>
+          effect.pipe(
+            Effect.catch((error) =>
+              Effect.logWarning("failed to auto-commit thread worktree after run completion", {
+                threadId,
+                cwd,
+                detail: error.message,
+              }),
+            ),
+          ),
+      ),
+    };
+  }),
+);
 
 export class RunFinalizationService extends Context.Service<
   RunFinalizationService,
@@ -102,6 +148,8 @@ export const layerObserver = Layer.effect(
     const pullRequests = yield* PullRequestService.PullRequestService;
     const projects = yield* ProjectService.ProjectService;
     const enrichment = yield* ProjectEnrichment.ProjectEnrichmentService;
+    const autoCommit = yield* ThreadWorktreeAutoCommit;
+    const autoCommits = yield* FiberMap.make<string>();
     const pullRequestLookups = yield* FiberMap.make<string>();
     const identityRefreshes = yield* FiberMap.make<ProjectId>();
     // A turn can add the first remote (`git remote add`, `gh repo create --push`), which the
@@ -140,6 +188,20 @@ export const layerObserver = Layer.effect(
           yield* refreshMissingRepositoryIdentity(thread.projectId).pipe(
             FiberMap.run(identityRefreshes, thread.projectId),
           );
+          if (
+            thread.worktreePath === cwd &&
+            hasUncommittedThreadWork({
+              worktreePath: thread.worktreePath,
+              threadBranch: thread.branch,
+              runActive: thread.activeRunId !== null && thread.activeRunId !== runId,
+              status: local,
+            })
+          ) {
+            // Commit-message generation calls a model, so the next turn must not wait for it.
+            yield* autoCommit
+              .afterRun({ cwd, threadId, runId })
+              .pipe(FiberMap.run(autoCommits, cwd, { onlyIfMissing: true }));
+          }
           if (local.refName === null || local.isDefaultRef) return;
           if (thread.branch !== local.refName) return;
           if (thread.activeRunId !== null && thread.activeRunId !== runId) return;

@@ -7,6 +7,7 @@ import {
   formatGeneratedBranchName,
   buildTemporaryWorktreeBranchName,
   flattenTemporaryWorktreeBranchName,
+  hasUncommittedThreadWork,
   isBareGitConfig,
   isTemporaryWorktreeBranch,
   normalizeGitRemoteUrl,
@@ -386,5 +387,34 @@ describe("formatGeneratedBranchName", () => {
         instructions: "",
       }),
     ).toBe("feat/add-search");
+  });
+});
+
+describe("hasUncommittedThreadWork", () => {
+  const dirty = {
+    isRepo: true,
+    isDefaultRef: false,
+    refName: "t3/feature",
+    hasWorkingTreeChanges: true,
+  };
+  const settled = {
+    worktreePath: "/repo/.wt/feature",
+    threadBranch: "t3/feature",
+    runActive: false,
+  };
+
+  it("offers a commit only for a settled thread's dirty worktree on its own branch", () => {
+    expect(hasUncommittedThreadWork({ ...settled, status: dirty })).toBe(true);
+    for (const input of [
+      { ...settled, status: { ...dirty, hasWorkingTreeChanges: false } },
+      { ...settled, runActive: true, status: dirty },
+      { ...settled, worktreePath: null, status: dirty },
+      { ...settled, status: { ...dirty, isDefaultRef: true } },
+      { ...settled, status: { ...dirty, refName: "someone-else" } },
+      { ...settled, status: { ...dirty, isRepo: false } },
+      { ...settled, status: null },
+    ]) {
+      expect(hasUncommittedThreadWork(input)).toBe(false);
+    }
   });
 });

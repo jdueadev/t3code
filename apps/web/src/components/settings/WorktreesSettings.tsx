@@ -51,6 +51,42 @@ function StartFromRemoteRow() {
   );
 }
 
+function AutoCommitRow() {
+  const settings = useScopedSettings();
+  const updateSettings = useUpdateScopedSettings();
+  return (
+    <SettingsRow
+      serverScoped
+      settingKeys={["autoCommitThreadWorktrees"]}
+      {...searchableSetting("auto-commit-thread-worktrees")}
+      description="When a run leaves uncommitted changes in a thread's worktree, commit them on the thread's branch without asking. Off, the thread offers the commit instead."
+      resetAction={
+        settings.autoCommitThreadWorktrees !==
+        DEFAULT_UNIFIED_SETTINGS.autoCommitThreadWorktrees ? (
+          <SettingResetButton
+            label="commit thread worktrees automatically"
+            onClick={() =>
+              updateSettings({
+                autoCommitThreadWorktrees: DEFAULT_UNIFIED_SETTINGS.autoCommitThreadWorktrees,
+              })
+            }
+          />
+        ) : null
+      }
+      control={
+        <ScopedSwitch
+          settingKeys={["autoCommitThreadWorktrees"]}
+          checked={settings.autoCommitThreadWorktrees}
+          onCheckedChange={(checked) =>
+            updateSettings({ autoCommitThreadWorktrees: Boolean(checked) })
+          }
+          aria-label="Commit thread worktrees automatically when a run ends"
+        />
+      }
+    />
+  );
+}
+
 export function WorktreesSettingsPanel() {
   const { scope } = useSettingsScope();
   const isProjectScope = scope.kind === "project" || scope.kind === "checkout";
@@ -66,6 +102,7 @@ export function WorktreesSettingsPanel() {
       </SettingsSection>
       <SettingsSection id="worktree-branches" title="Branches">
         <BranchNamingSettings />
+        {!isProjectScope && <AutoCommitRow />}
       </SettingsSection>
       <WorktreeCleanupSection />
     </SettingsPageContainer>
