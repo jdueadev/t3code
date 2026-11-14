@@ -55,6 +55,7 @@ import {
   makeProviderFailureTurnItem,
 } from "@t3tools/provider-core/server/failure";
 import * as RunFinalizationService from "./RunFinalizationService.ts";
+import { RUN_STALLED_CODE, failWhenStalled, runStalledErrorOf } from "./RunStallWatchdog.ts";
 import * as ThreadCommandExecutor from "./ThreadCommandExecutor.ts";
 import * as TurnItemPositionStore from "./TurnItemPositionStore.ts";
 import { userFacingDatabaseErrorMessage } from "./UserFacingErrors.ts";
@@ -1088,6 +1089,10 @@ export const layer: Layer.Layer<
           attemptId: input.attempt.id,
           providerThreadId: input.providerThread.id,
         };
+        const stallAfterMinutes = yield* serverSettings.getSettings.pipe(
+          Effect.map((settings) => settings.usageLimitRouting.stallAfterMinutes),
+          Effect.orElseSucceed(() => 10),
+        );
         const eventSubscription =
           input.session.subscribeEvents === undefined
             ? { events: input.session.events, close: Effect.void }
@@ -1131,6 +1136,8 @@ export const layer: Layer.Layer<
           ReadonlySet<OrchestrationV2TurnItem["id"]>
         >(new Set(inheritedBackgroundTurnItemsById.keys()));
         const openRunOwnedSubagents = yield* Ref.make(emptyOpenRunOwnedSubagentProjection());
+        // Approvals and questions wait on the user, so their silence is not a stall.
+        const pendingRuntimeRequests = new Set<string>();
         // The last stored root snapshot's pendingBackgroundWork; adapters that omit it leave it false.
         let rootSnapshotPendingWork = false;
         let rootTurnOwnershipChecked = false;
@@ -1703,14 +1710,35 @@ export const layer: Layer.Layer<
               pendingBackgroundProviderTurns.delete(event.providerTurnId);
             }
           }
+          if (event.type === "runtime_request.updated") {
+            if (event.runtimeRequest.status === "pending") {
+              pendingRuntimeRequests.add(event.runtimeRequest.id);
+            } else {
+              pendingRuntimeRequests.delete(event.runtimeRequest.id);
+            }
+          }
           yield* trackChildLifecycle(event, deliveredEvent !== null);
           yield* scheduleIdleFlush;
         });
+        // Silence is expected after the root turn ends, while work runs, or while the user decides.
+        const stallQuietAllowed = Effect.gen(function* () {
+          return (
+            (yield* Ref.get(rootTerminalSeen)) ||
+            pendingRuntimeRequests.size > 0 ||
+            pendingBackgroundProviderTurns.size > 0 ||
+            rootSnapshotPendingWork ||
+            (yield* Ref.get(activeBackgroundTurnItems)).size > 0 ||
+            (yield* Ref.get(activeChildProviderTurns)).size > 0 ||
+            (yield* Ref.get(activeChildSubagents)).size > 0
+          );
+        });
         const providerEventFiber = yield* eventSink
           .consumeProviderEvents(
-            eventSubscription.events.pipe(
-              Stream.merge(Stream.fromQueue(idleFlushTicks), { haltStrategy: "left" }),
-            ),
+            failWhenStalled(eventSubscription.events, {
+              stallMs: stallAfterMinutes === null ? null : stallAfterMinutes * 60_000,
+              quietAllowed: stallQuietAllowed,
+              afterUsageLimit: input.run.usageLimitContinuationOfRunId !== undefined,
+            }).pipe(Stream.merge(Stream.fromQueue(idleFlushTicks), { haltStrategy: "left" })),
             (event) =>
               event.type === "idle_flush"
                 ? flushIdleAssistantText(event.at)
@@ -1795,6 +1823,7 @@ export const layer: Layer.Layer<
                     cause,
                   });
                   if (yield* Ref.get(rootRunFinalized)) return;
+                  const stalled = runStalledErrorOf(squashed);
                   const providerThread = yield* Ref.get(latestProviderThread);
                   // Stop background work too; the failed consumer cannot persist terminal events.
                   const abandonedProviderTurn =
@@ -1848,13 +1877,20 @@ export const layer: Layer.Layer<
                     ...(abandonedProviderTurn === null ? {} : { abandonedProviderTurn }),
                     completedAt,
                     terminal: makeFailedTerminalEvent(
-                      makeProviderFailure({
-                        cause: squashed,
-                        message:
-                          knownProviderFailureMessage(squashed) ??
-                          userFacingDatabaseErrorMessage(squashed),
-                        class: "unknown",
-                      }),
+                      stalled === null
+                        ? makeProviderFailure({
+                            cause: squashed,
+                            message:
+                              knownProviderFailureMessage(squashed) ??
+                              userFacingDatabaseErrorMessage(squashed),
+                            class: "unknown",
+                          })
+                        : makeProviderFailure({
+                            message: stalled.message,
+                            code: RUN_STALLED_CODE,
+                            class: "transport_error",
+                            retryable: true,
+                          }),
                       latestItemOrdinal + 1,
                     ),
                     failureItemPersisted: false,

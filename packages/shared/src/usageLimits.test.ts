@@ -1,5 +1,6 @@
 import {
   DEFAULT_SERVER_SETTINGS,
+  type UsageLimitRoutingSettings,
   EnvironmentId,
   ProviderDriverKind,
   ProviderInstanceId,
@@ -25,6 +26,11 @@ import {
   paceRemainingPercent,
   usesChatGptSharing,
   resolveNewThreadModelSelection,
+  chooseUsageLimitFallback,
+  isLocalProviderInstance,
+  usageLimitFallbackOptions,
+  usageLimitFallbacksFor,
+  usageLimitRouteMessage,
 } from "./usageLimits.ts";
 
 const now = Date.parse("2026-09-03T12:00:00.000Z");
@@ -54,6 +60,119 @@ function provider(overrides: Partial<ServerProvider>): ServerProvider {
     ...overrides,
   };
 }
+
+describe("usage limit routing", () => {
+  const id = ProviderInstanceId.make;
+  const codex = { instanceId: id("codex"), model: "gpt-6.1-sol" };
+  const codexMini = { instanceId: id("codex"), model: "gpt-6.1-luna" };
+  const claude = { instanceId: id("claude"), model: "claude-fable-5-1" };
+  const local = { instanceId: id("llama"), model: "qwen-coder" };
+  const localSmall = { instanceId: id("llama"), model: "qwen-small" };
+  const routing = (
+    overrides: Partial<UsageLimitRoutingSettings> = {},
+  ): UsageLimitRoutingSettings => ({
+    ...DEFAULT_SERVER_SETTINGS.usageLimitRouting,
+    fallbacks: [
+      { match: "codex", fallbacks: [codexMini, claude] },
+      { match: "llama", fallbacks: [claude, localSmall] },
+    ],
+    ...overrides,
+  });
+  const spent = {
+    usageLimits: {
+      checkedAt: "2026-09-03T11:00:00.000Z",
+      windows: [{ ...window, usedPercent: 100 }],
+    },
+  };
+  const providers = [
+    provider({}),
+    provider({ instanceId: claude.instanceId, driver: ProviderDriverKind.make("claudeAgent") }),
+    provider({
+      instanceId: local.instanceId,
+      driver: ProviderDriverKind.make("opencode"),
+      auth: { status: "authenticated", endpoint: "http://127.0.0.1:8080" },
+    }),
+  ];
+  const choose = (overrides: Partial<Parameters<typeof chooseUsageLimitFallback>[0]> = {}) =>
+    chooseUsageLimitFallback({ from: codex, routing: routing(), providers, now, ...overrides })
+      ?.selection ?? null;
+
+  it("defaults to asking, with a ten minute stall watchdog", () => {
+    expect(DEFAULT_SERVER_SETTINGS.usageLimitRouting).toMatchObject({
+      onLimit: "ask",
+      fallbacks: [],
+      stallAfterMinutes: 10,
+    });
+  });
+  it("tries the user's fallbacks in order, same provider first", () => {
+    expect(choose()).toEqual(codexMini);
+    expect(choose({ tried: [codexMini] })).toEqual(claude);
+    expect(choose({ tried: [codexMini, claude] })).toBeNull();
+  });
+  it("skips a fallback that is out of quota or unavailable", () => {
+    const withSpentMini = (extra: Partial<ServerProvider>) =>
+      providers.map((entry) =>
+        entry.instanceId === claude.instanceId ? { ...entry, ...extra } : entry,
+      );
+    // codexMini shares the spent codex window, so the next provider answers.
+    expect(
+      choose({
+        providers: providers.map((entry) =>
+          entry.instanceId === codex.instanceId ? { ...entry, ...spent } : entry,
+        ),
+      }),
+    ).toEqual(claude);
+    expect(choose({ tried: [codexMini], providers: withSpentMini({ enabled: false }) })).toBeNull();
+    expect(choose({ tried: [codexMini], providers: withSpentMini(spent) })).toBeNull();
+  });
+  it("matches exact models, then the longest family prefix, then the instance", () => {
+    const rules = routing({
+      fallbacks: [
+        { match: "codex", fallbacks: [claude] },
+        { match: "codex:gpt-6*", fallbacks: [codexMini] },
+        { match: "codex:gpt-6.1-sol", fallbacks: [local] },
+      ],
+    });
+    expect(usageLimitFallbacksFor(rules, codex)).toEqual([local]);
+    expect(usageLimitFallbacksFor(rules, { ...codex, model: "gpt-6.2" })).toEqual([codexMini]);
+    expect(usageLimitFallbacksFor(rules, { ...codex, model: "o9" })).toEqual([claude]);
+    expect(usageLimitFallbacksFor(routing({ fallbacks: [] }), codex, claude)).toEqual([claude]);
+    expect(usageLimitFallbacksFor(routing({ fallbacks: [] }), codex)).toEqual([]);
+  });
+  it("never routes a local model to a remote provider the user has not allowed", () => {
+    const options = usageLimitFallbackOptions({ from: local, routing: routing(), providers, now });
+    expect(options.map((option) => option.rejection)).toEqual([
+      "remote, and not allowed for a local model",
+      null,
+    ]);
+    expect(choose({ from: local })).toEqual(localSmall);
+    expect(
+      choose({ from: local, routing: routing({ remoteFallbackInstances: [claude.instanceId] }) }),
+    ).toEqual(claude);
+    // A remote model may still use any fallback.
+    expect(
+      choose({ routing: routing({ fallbacks: [{ match: "codex", fallbacks: [local] }] }) }),
+    ).toEqual(local);
+  });
+  it("treats a loopback usage hub as remote and a listed instance as local", () => {
+    const hubbed = provider({
+      auth: { status: "authenticated", endpoint: "http://127.0.0.1:8317" },
+    });
+    expect(isLocalProviderInstance(hubbed, routing(), ["http://127.0.0.1:8317"])).toBe(false);
+    expect(isLocalProviderInstance(hubbed, routing(), [])).toBe(true);
+    expect(isLocalProviderInstance(provider({}), routing(), [])).toBe(false);
+    expect(
+      isLocalProviderInstance(provider({}), routing({ localInstances: [codex.instanceId] }), []),
+    ).toBe(true);
+  });
+  it("records which model answers and why", () => {
+    expect(
+      usageLimitRouteMessage({ from: codex, to: claude, providers, resetAt: window.resetsAt }),
+    ).toBe(
+      "Continue where you left off. T3 Code moved this thread from codex gpt-6.1-sol to claude claude-fable-5-1 because codex gpt-6.1-sol reached its usage limit (it resets at 2026-09-03T14:00:00.000Z).",
+    );
+  });
+});
 
 describe("new thread model fallback", () => {
   const selection = { instanceId: ProviderInstanceId.make("codex"), model: "gpt-6.1-sol" };

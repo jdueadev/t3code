@@ -35,6 +35,7 @@ import * as GitWorkflowService from "../git/GitWorkflowService.ts";
 import * as ProjectService from "../project/ProjectService.ts";
 import * as ProviderAuthService from "../provider/ProviderAuthService.ts";
 import * as ServerSettings from "../serverSettings.ts";
+import { USAGE_LIMIT_PREEMPTED_CODE, UsageLimitPreemption } from "../usage/UsageLimitSources.ts";
 import { makeRestoreMissingWorktree } from "../workspace/restoreMissingWorktree.ts";
 import * as EventSink from "./EventSink.ts";
 import * as ProviderUsageAnalytics from "../telemetry/ProviderUsageAnalytics.ts";
@@ -158,6 +159,7 @@ export const layer: Layer.Layer<
     const path = yield* Path.Path;
     const projects = yield* ProjectService.ProjectService;
     const providerAuth = yield* ProviderAuthService.ProviderAuthService;
+    const usageLimitPreemption = yield* UsageLimitPreemption;
     const projectionStore = yield* ProjectionStore.ProjectionStoreV2;
     const providerSessions = yield* ProviderSessionManager.ProviderSessionManagerV2;
     const runExecution = yield* RunExecutionService.RunExecutionServiceV2;
@@ -563,6 +565,32 @@ export const layer: Layer.Layer<
           });
           return;
         }
+      }
+      // A turn that would start out of quota fails mid-run and its retries compound, so the
+      // run ends here as limited, before the provider is asked; recovery then applies the
+      // user's usage limit setting.
+      const preempted = yield* usageLimitPreemption.check(run.modelSelection);
+      if (preempted !== null) {
+        const now = yield* DateTime.now;
+        yield* settleRunBeforeStart({
+          signal: "usage-limit-preempted",
+          status: "failed",
+          now,
+          providerInstanceId: run.providerInstanceId,
+          itemProviderThreadId: providerThread.id,
+          item: {
+            type: "error",
+            title: "Usage limit reached",
+            failure: makeProviderFailure({
+              class: "usage_limit",
+              code: USAGE_LIMIT_PREEMPTED_CODE,
+              retryable: true,
+              resetAt: preempted.resetAt,
+              message: `${run.modelSelection.model} is out of quota until ${preempted.resetAt} (read from ${preempted.source}), so T3 Code did not start this turn. It continues as Settings > Usage limits says: on the reset, on a fallback model, or when you pick another model.`,
+            }),
+          },
+        });
+        return;
       }
       const recreateResult = yield* Effect.result(restoreMissingWorktree(projection.thread));
       if (recreateResult._tag === "Failure") {

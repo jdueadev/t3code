@@ -32,7 +32,7 @@ import {
 } from "../telemetry/ProviderUsageAnalytics.ts";
 import * as GitVcsDriver from "../vcs/GitVcsDriver.ts";
 import * as ProviderInstanceRegistry from "../provider/ProviderInstanceRegistry.ts";
-import { UsageLimitResetFallback } from "../usage/UsageLimitSources.ts";
+import { UsageLimitResetFallback, classifyQuotaRouterFailure } from "../usage/UsageLimitSources.ts";
 import * as EventSink from "./EventSink.ts";
 import * as ProjectionStore from "./ProjectionStore.ts";
 import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
@@ -661,7 +661,7 @@ export const layer: Layer.Layer<
               const occurredAt = yield* DateTime.now;
               const reported = (yield* agentScope.oomKilled(input.threadId))
                 ? { ...input.event.failure, message: "Killed: out of memory.", code: "oom_kill" }
-                : input.event.failure;
+                : classifyQuotaRouterFailure(input.event.failure);
               // A proxied CLI can drop the reset time; the hub still knows when its pool refills.
               const endpoint =
                 reported.class === "usage_limit" && reported.resetAt == null

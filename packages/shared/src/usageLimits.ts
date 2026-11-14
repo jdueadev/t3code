@@ -15,9 +15,12 @@ import {
   type ServerProviderUsageLimits,
   type ServerProviderUsageWindow,
   type UsageLimitSourceSnapshots,
+  type UsageLimitRoutingSettings,
 } from "@t3tools/contracts";
 
 import * as DateTime from "effect/DateTime";
+
+import { isLoopbackHost } from "./preview.ts";
 
 const MINUTE = 60_000;
 const HOUR = 60 * MINUTE;
@@ -112,6 +115,149 @@ export function resolveNewThreadModelSelection(input: {
     selection: input.fallbackSelection,
     fallback: { provider, resetsAt: window.resetsAt ?? null },
   };
+}
+
+/**
+ * Whether an instance runs on this machine. A loopback endpoint that is a usage hub's origin is
+ * a proxy to remote accounts, so it does not count.
+ */
+export function isLocalProviderInstance(
+  provider: Pick<ServerProvider, "instanceId" | "auth">,
+  routing: Pick<UsageLimitRoutingSettings, "localInstances">,
+  hubOrigins: ReadonlyArray<string>,
+): boolean {
+  if (routing.localInstances.includes(provider.instanceId)) return true;
+  const url = provider.auth.endpoint === undefined ? null : URL.parse(provider.auth.endpoint);
+  return url !== null && isLoopbackHost(url.hostname) && !hubOrigins.includes(url.origin);
+}
+
+/**
+ * The user's ordered fallbacks for a model: the rule for `<instance>:<model>`, else the longest
+ * `<instance>:<prefix>*`, else `<instance>`. Without a rule, the new-thread fallback model.
+ */
+export function usageLimitFallbacksFor(
+  routing: Pick<UsageLimitRoutingSettings, "fallbacks">,
+  from: ModelSelection,
+  fallbackSelection: ModelSelection | null = null,
+): ReadonlyArray<ModelSelection> {
+  const exact = routing.fallbacks.find((rule) => rule.match === `${from.instanceId}:${from.model}`);
+  const family = [...routing.fallbacks]
+    .filter((rule) => {
+      const prefix = `${from.instanceId}:`;
+      return (
+        rule.match.startsWith(prefix) &&
+        rule.match.endsWith("*") &&
+        from.model.startsWith(rule.match.slice(prefix.length, -1))
+      );
+    })
+    .sort((left, right) => right.match.length - left.match.length)[0];
+  const instance = routing.fallbacks.find((rule) => rule.match === from.instanceId);
+  const rule = exact ?? family ?? instance;
+  if (rule !== undefined) return rule.fallbacks;
+  return fallbackSelection === null ? [] : [fallbackSelection];
+}
+
+export type UsageLimitFallbackRejection =
+  | "same model"
+  | "already tried"
+  | "unavailable"
+  | "out of quota"
+  | "disabled for this project"
+  | "remote, and not allowed for a local model";
+
+export interface UsageLimitFallbackOption {
+  readonly selection: ModelSelection;
+  readonly provider: ServerProvider | undefined;
+  /** Null when the option can be used. */
+  readonly rejection: UsageLimitFallbackRejection | null;
+}
+
+/**
+ * Every configured fallback for `from`, in the user's order, with why each one cannot be used.
+ * A local model never falls back to a remote instance the user has not allowed.
+ */
+export function usageLimitFallbackOptions(input: {
+  readonly from: ModelSelection;
+  readonly routing: UsageLimitRoutingSettings;
+  readonly providers: readonly ServerProvider[];
+  readonly now: number;
+  /** Origins of the configured usage hubs, which proxy remote accounts. */
+  readonly hubOrigins?: ReadonlyArray<string>;
+  /** Models this limit chain already ran on. */
+  readonly tried?: ReadonlyArray<ModelSelection>;
+  readonly fallbackSelection?: ModelSelection | null;
+  readonly settings?: ServerSettings;
+  readonly projectId?: ProjectId | null;
+}): ReadonlyArray<UsageLimitFallbackOption> {
+  const hubOrigins = input.hubOrigins ?? [];
+  const byInstance = (instanceId: ProviderInstanceId) =>
+    input.providers.find((entry) => entry.instanceId === instanceId);
+  const source = byInstance(input.from.instanceId);
+  const fromLocal =
+    source !== undefined && isLocalProviderInstance(source, input.routing, hubOrigins);
+  const same = (left: ModelSelection, right: ModelSelection) =>
+    left.instanceId === right.instanceId && left.model === right.model;
+  return usageLimitFallbacksFor(input.routing, input.from, input.fallbackSelection ?? null).map(
+    (selection): UsageLimitFallbackOption => {
+      const provider = byInstance(selection.instanceId);
+      const rejection: UsageLimitFallbackRejection | null = same(selection, input.from)
+        ? "same model"
+        : (input.tried ?? []).some((tried) => same(tried, selection))
+          ? "already tried"
+          : provider === undefined ||
+              !provider.enabled ||
+              !provider.installed ||
+              provider.auth.status === "unauthenticated" ||
+              !isProviderAvailable(provider)
+            ? "unavailable"
+            : exhaustedUsageWindow(provider, input.now, selection.model)
+              ? "out of quota"
+              : input.settings &&
+                  !resolveProjectProviderInstanceEnabled(
+                    input.settings,
+                    input.projectId ?? null,
+                    provider.instanceId,
+                  )
+                ? "disabled for this project"
+                : fromLocal &&
+                    !isLocalProviderInstance(provider, input.routing, hubOrigins) &&
+                    !input.routing.remoteFallbackInstances.includes(provider.instanceId)
+                  ? "remote, and not allowed for a local model"
+                  : null;
+      return { selection, provider, rejection };
+    },
+  );
+}
+
+/** The first usable fallback, or null when the thread has to wait for the reset. */
+export function chooseUsageLimitFallback(
+  input: Parameters<typeof usageLimitFallbackOptions>[0],
+): UsageLimitFallbackOption | null {
+  return usageLimitFallbackOptions(input).find((option) => option.rejection === null) ?? null;
+}
+
+function modelLabel(selection: ModelSelection, provider: ServerProvider | undefined): string {
+  const model = provider?.models.find((entry) => entry.slug === selection.model)?.name;
+  return `${provider?.displayName ?? selection.instanceId} ${model ?? selection.model}`;
+}
+
+/** The continuation text that records, in the thread, which model answers next and why. */
+export function usageLimitRouteMessage(input: {
+  readonly from: ModelSelection;
+  readonly to: ModelSelection;
+  readonly providers: readonly ServerProvider[];
+  readonly resetAt: string | null;
+}): string {
+  const label = (selection: ModelSelection) =>
+    modelLabel(
+      selection,
+      input.providers.find((entry) => entry.instanceId === selection.instanceId),
+    );
+  const reset =
+    input.resetAt === null || !Number.isFinite(Date.parse(input.resetAt))
+      ? ""
+      : ` (it resets at ${DateTime.formatIso(DateTime.makeUnsafe(Date.parse(input.resetAt)))})`;
+  return `Continue where you left off. T3 Code moved this thread from ${label(input.from)} to ${label(input.to)} because ${label(input.from)} reached its usage limit${reset}.`;
 }
 
 export const CHATGPT_USAGE_URL = "https://chatgpt.com/#settings/Usage";
