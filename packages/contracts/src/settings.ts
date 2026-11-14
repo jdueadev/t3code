@@ -1347,6 +1347,57 @@ export const StorageCleanupSettings = Schema.Struct({
 });
 export type StorageCleanupSettings = typeof StorageCleanupSettings.Type;
 
+/**
+ * What a thread does when its model reports a usage limit, or is known to be out of quota
+ * before a turn starts. `ask` stops and offers the fallbacks; `wait` resumes at the reset;
+ * `auto-route` continues on the first eligible fallback and waits when none is eligible.
+ */
+export const UsageLimitAction = Schema.Literals(["ask", "auto-route", "wait"]);
+export type UsageLimitAction = typeof UsageLimitAction.Type;
+
+/** Ordered fallbacks for the models `match` names: `<instance>` or `<instance>:<model>`. */
+export const UsageLimitFallbackRule = Schema.Struct({
+  match: TrimmedNonEmptyString,
+  fallbacks: Schema.Array(ModelSelection),
+});
+export type UsageLimitFallbackRule = typeof UsageLimitFallbackRule.Type;
+
+/**
+ * A command whose stdout is a quota router status (`quota-tools status --json`). Run without a
+ * shell; the user wires any key it needs, so no key is stored here.
+ */
+export const QuotaStatusCommand = Schema.Struct({
+  command: TrimmedNonEmptyString,
+  args: Schema.Array(Schema.String).pipe(Schema.withDecodingDefault(Effect.succeed([]))),
+});
+export type QuotaStatusCommand = typeof QuotaStatusCommand.Type;
+
+export const RunStallMinutes = Schema.Int.check(Schema.isBetween({ minimum: 1, maximum: 1440 }));
+
+export const UsageLimitRoutingSettings = Schema.Struct({
+  onLimit: UsageLimitAction.pipe(Schema.withDecodingDefault(Effect.succeed("ask"))),
+  fallbacks: Schema.Array(UsageLimitFallbackRule).pipe(
+    Schema.withDecodingDefault(Effect.succeed([])),
+  ),
+  /** Instances that run on this machine; loopback endpoints that are not a usage hub count too. */
+  localInstances: Schema.Array(ProviderInstanceId).pipe(
+    Schema.withDecodingDefault(Effect.succeed([])),
+  ),
+  /** Remote instances a local model may fall back to. Nothing else leaves the machine. */
+  remoteFallbackInstances: Schema.Array(ProviderInstanceId).pipe(
+    Schema.withDecodingDefault(Effect.succeed([])),
+  ),
+  /** A run with no provider output for this long, outside tools and requests, fails as stalled. */
+  stallAfterMinutes: Schema.NullOr(RunStallMinutes).pipe(
+    Schema.withDecodingDefault(Effect.succeed(10)),
+  ),
+  /** Off by default: limits are then read from providers, hubs and the proxy's final error. */
+  quotaStatusCommand: Schema.NullOr(QuotaStatusCommand).pipe(
+    Schema.withDecodingDefault(Effect.succeed(null)),
+  ),
+});
+export type UsageLimitRoutingSettings = typeof UsageLimitRoutingSettings.Type;
+
 const CloudSpeechCredential = SettingsSecretValue.pipe(
   Schema.withDecodingDefault(Effect.succeed("")),
 );
@@ -1455,6 +1506,9 @@ export const ServerSettings = Schema.Struct({
   idleCompaction: Schema.optionalKey(IdleCompactionMode),
   snoozeLimitedThreads: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
   autoResumeLimitedThreads: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
+  usageLimitRouting: UsageLimitRoutingSettings.pipe(
+    Schema.withDecodingDefault(Effect.succeed(Schema.decodeSync(UsageLimitRoutingSettings)({}))),
+  ),
   snoozePresets: SnoozePresetSettings.pipe(
     Schema.withDecodingDefault(Effect.succeed(DEFAULT_SNOOZE_PRESETS)),
   ),
@@ -1904,6 +1958,17 @@ export const ServerSettingsPatch = Schema.Struct({
   sidebarAutoSettleOnMerge: Schema.optionalKey(Schema.Boolean),
   autoResumeLimitedThreads: Schema.optionalKey(Schema.Boolean),
   snoozeLimitedThreads: Schema.optionalKey(Schema.Boolean),
+  /** Each field given replaces the saved one whole, so a list can shrink. */
+  usageLimitRouting: Schema.optionalKey(
+    Schema.Struct({
+      onLimit: Schema.optionalKey(UsageLimitAction),
+      fallbacks: Schema.optionalKey(Schema.Array(UsageLimitFallbackRule)),
+      localInstances: Schema.optionalKey(Schema.Array(ProviderInstanceId)),
+      remoteFallbackInstances: Schema.optionalKey(Schema.Array(ProviderInstanceId)),
+      stallAfterMinutes: Schema.optionalKey(Schema.NullOr(RunStallMinutes)),
+      quotaStatusCommand: Schema.optionalKey(Schema.NullOr(QuotaStatusCommand)),
+    }),
+  ),
   snoozePresets: Schema.optionalKey(SnoozePresetSettings),
   hiddenThreadTags: Schema.optionalKey(Schema.Array(Schema.String)),
   hideTaggedThreads: Schema.optionalKey(Schema.Boolean),

@@ -6,6 +6,34 @@ import * as Option from "effect/Option";
 import * as Path from "effect/Path";
 
 import type * as GitVcsDriver from "./GitVcsDriver.ts";
+import {
+  listProcesses,
+  occupantsInside,
+  worktreeOccupiedDiagnostic,
+  type RunHelper,
+  type WorktreeOccupant,
+} from "./worktreeOccupants.ts";
+
+/** Processes running from inside a worktree; null when the platform could not be read. */
+export type FindWorktreeOccupants = (
+  worktreePath: string,
+) => Effect.Effect<ReadonlyArray<WorktreeOccupant> | null, never, FileSystem.FileSystem>;
+
+export const makeFindWorktreeOccupants =
+  (run: RunHelper): FindWorktreeOccupants =>
+  (worktreePath) =>
+    Effect.gen(function* () {
+      const platform = yield* HostProcess.Platform;
+      const processes = yield* listProcesses(platform, run);
+      return processes === null
+        ? null
+        : occupantsInside(processes, worktreePath, {
+            windows: platform === "win32",
+            selfPid: process.pid,
+          });
+    }).pipe(Effect.orElseSucceed(() => null));
+
+const WORKTREE_IN_USE_REASON = "worktree_in_use";
 
 const INDEX_LIST_MAX_BYTES = 64 * 1024 * 1024;
 
@@ -23,6 +51,9 @@ export const removeLinkedWorktree = Effect.fn("WorktreeRemoval.removeLinkedWorkt
   readonly cwd: string;
   readonly worktreePath: string;
   readonly force: boolean;
+  /** Removes the worktree even while processes run from inside it; the override is logged. */
+  readonly ignoreRunningProcesses?: boolean | undefined;
+  readonly findOccupants: FindWorktreeOccupants;
   readonly execute: GitVcsDriver.GitVcsDriver["Service"]["execute"];
   readonly run: (args: ReadonlyArray<string>) => Effect.Effect<A, E, R>;
 }) {
@@ -30,6 +61,27 @@ export const removeLinkedWorktree = Effect.fn("WorktreeRemoval.removeLinkedWorkt
   const path = yield* Path.Path;
   const worktreePath = input.worktreePath;
   const gitFile = path.join(worktreePath, ".git");
+  // Deleting a folder a process works in leaves it half removed, so check before any delete.
+  const occupants = yield* input.findOccupants(worktreePath);
+  if (occupants === null) {
+    yield* Effect.logWarning("worktree removal could not list running processes; removing anyway", {
+      worktreePath,
+    });
+  } else if (occupants.length > 0) {
+    if (input.ignoreRunningProcesses !== true) {
+      return yield* new GitCommandError({
+        operation: input.operation,
+        command: "git worktree remove",
+        cwd: input.cwd,
+        reason: WORKTREE_IN_USE_REASON,
+        detail: worktreeOccupiedDiagnostic(worktreePath, occupants, yield* HostProcess.isWindows),
+      });
+    }
+    yield* Effect.logWarning("worktree removed while processes run from inside it (override)", {
+      worktreePath,
+      occupants,
+    });
+  }
   // Git refuses to remove a worktree with untracked files unless forced, but
   // its check honors `status.showUntrackedFiles=no` and would delete them.
   const statusConfig = ["-c", "status.showUntrackedFiles=normal"];

@@ -50,7 +50,8 @@ import {
   unsetInheritedRepositoryEnv,
 } from "./VcsProcess.ts";
 import { makeWorktreeCheckoutCache } from "./worktreeCheckoutCache.ts";
-import { removeLinkedWorktree } from "./worktreeRemoval.ts";
+import { makeFindWorktreeOccupants, removeLinkedWorktree } from "./worktreeRemoval.ts";
+import * as ProcessRunner from "../processRunner.ts";
 import { resolveWorktreesDirectory } from "../worktreesDirectory.ts";
 import {
   parseRemoteNames,
@@ -980,6 +981,17 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
   const fileSystem = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
   const commandSpawner = yield* ChildProcessSpawner.ChildProcessSpawner;
+  const helperRunner = yield* ProcessRunner.make().pipe(
+    Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, commandSpawner),
+  );
+  const findWorktreeOccupants = makeFindWorktreeOccupants((command, args) =>
+    helperRunner
+      .run({ command, args, timeout: "20 seconds", maxOutputBytes: 32 * 1024 * 1024 })
+      .pipe(
+        Effect.map((result) => (result.code === 0 && !result.timedOut ? result.stdout : null)),
+        Effect.orElseSucceed(() => null),
+      ),
+  );
   const { worktreesDir, worktreeCheckoutCacheDir } = yield* ServerConfig.ServerConfig;
   const isServerInternalPath = yield* makeIsServerInternalPath;
   const digest = yield* Digest.Digest;
@@ -5454,6 +5466,8 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
       cwd: input.cwd,
       worktreePath: target,
       force: input.force === true,
+      ignoreRunningProcesses: input.ignoreRunningProcesses,
+      findOccupants: findWorktreeOccupants,
       execute,
       run: (args) =>
         executeGitWithStableDiagnostics("GitVcsDriver.removeWorktree", input.cwd, args, {
@@ -5869,6 +5883,11 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
     writeConfigValue,
     removeWorktree: Effect.fnUntraced(function* (input) {
       return yield* withListRefsInvalidation(input.cwd, removeWorktree(input));
+    }),
+    worktreeOccupants: Effect.fn("GitVcsDriver.worktreeOccupants")(function* (worktreePath) {
+      return yield* findWorktreeOccupants(worktreePath).pipe(
+        Effect.provideService(FileSystem.FileSystem, fileSystem),
+      );
     }),
     pruneWorktrees: Effect.fnUntraced(function* (input) {
       return yield* withListRefsInvalidation(input.cwd, pruneWorktrees(input));

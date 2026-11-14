@@ -1,5 +1,6 @@
 import {
   type EnvironmentId,
+  type ModelSelection,
   type ProviderInteractionMode,
   type RunId,
   type RuntimeMode,
@@ -85,7 +86,8 @@ export function useComposerResume(input: ComposerResumeInput) {
   const isResuming = resumingThreadKeys.has(routeThreadKey);
   const { sendInFlight: sendInFlightRef } = draftSendState(routeThreadKey);
 
-  const onResume = async () => {
+  /** `modelOverride` continues on that model instead of the composer's. */
+  const onResume = async (modelOverride?: ModelSelection) => {
     if (
       !activeThread ||
       !canResume ||
@@ -109,7 +111,8 @@ export function useComposerResume(input: ComposerResumeInput) {
       }
       // Read before the first await: the composer follows the route, so after the user switches
       // threads it holds the other thread's model.
-      const modelSelection = composerRef.current?.getSendContext().selectedModelSelection;
+      const modelSelection =
+        modelOverride ?? composerRef.current?.getSendContext().selectedModelSelection;
       const createdAt = new Date().toISOString();
       const settingsResult = await persistThreadSettingsForNextTurn({
         threadId,

@@ -412,6 +412,8 @@ export function applyServerSettingsPatch(
     projectAgentBrowserAccessOverrides: _legacyBrowserAccess,
     projectAutoPullOverrides: _legacyAutoPull,
     projectScriptOverrides: _legacyScripts,
+    // Field replacement: deepMerge would merge the lists by index.
+    usageLimitRouting: usageLimitRoutingPatch,
     ...patchForMerge
   } = patch;
   const currentBackgroundActivity = normalizeServerBackgroundActivitySettings(current);
@@ -506,6 +508,9 @@ export function applyServerSettingsPatch(
     ...next,
     favorites,
     providerModelPreferences: nextModelPreferences,
+    ...(usageLimitRoutingPatch === undefined
+      ? {}
+      : { usageLimitRouting: { ...current.usageLimitRouting, ...usageLimitRoutingPatch } }),
     ...(worktreeCleanupPatch === undefined
       ? {}
       : {

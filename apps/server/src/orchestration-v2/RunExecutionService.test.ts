@@ -3464,6 +3464,24 @@ it.effect("fails the run when its event stream ends without a root terminal", ()
   }),
 );
 
+it.effect("fails a run as stalled and stops its turn when the provider goes silent", () =>
+  Effect.gen(function* () {
+    const interrupted = yield* Ref.make(0);
+    const { written, observed } = yield* captureRootRunTermination({
+      key: "stream-stalled",
+      shouldFinalizeRun: () => Effect.succeed(true),
+      events: () => Stream.never,
+      interruptTurn: () => Ref.update(interrupted, (count) => count + 1),
+      afterStart: () => TestClock.adjust("10 minutes"),
+    });
+    assert.deepEqual(observed, ["run:failed", "pull-requests-refreshed"]);
+    const failure = written.find((item) => item.type === "error");
+    assert.equal(failure?.type === "error" ? failure.failure.code : null, "run_stalled");
+    assert.match(failure?.type === "error" ? failure.failure.message : "", /^Stalled: no output/);
+    assert.equal(yield* Ref.get(interrupted), 1);
+  }),
+);
+
 it.effect("leaves the run to restart recovery when shutdown interrupts its event stream", () =>
   Effect.gen(function* () {
     const { written, observed } = yield* captureRootRunTermination({

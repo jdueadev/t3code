@@ -37,7 +37,10 @@ import { useComposerResume } from "./chat/useComposerResume";
 import { ThreadFind, ThreadFindCanvas } from "./chat/ThreadFindProvider";
 import { closeThreadFind, openThreadFind, useThreadFindOpen } from "./chat/threadFindStore";
 import { THREAD_FIND_BAR_RESERVED_HEIGHT } from "./chat/ThreadFindBar";
-import { usageLimitRecoveryBannerItem } from "./chat/UsageLimitRecoveryBanner";
+import {
+  usageLimitContinueOptions,
+  usageLimitRecoveryBannerItem,
+} from "./chat/UsageLimitRecoveryBanner";
 import { isThreadEnvironmentLocked, resolveDraftHeroState } from "./ChatView.logic";
 import { useQueuedRunEdit } from "./chat/useQueuedRunEdit";
 import { recallCheckoutIsRepo, rememberCheckoutIsRepo } from "./ChatView.logic";
@@ -2658,6 +2661,17 @@ export default function ChatView(props: ChatViewProps) {
             });
             if (result._tag === "Failure") throw squashAtomCommandFailure(result);
           },
+          continueOptions: usageLimitContinueOptions({
+            from: serverProjection?.runs.find((run) => run.id === limitRecoveryRun.runId)
+              ?.modelSelection,
+            settings,
+            providers: providerStatuses,
+            hubOrigins: (serverConfig?.usageLimitSources ?? []).flatMap((source) =>
+              source.origin === undefined ? [] : [source.origin],
+            ),
+            projectId: activeThreadShell.projectId,
+          }),
+          onContinueWith: (selection) => void onResume(selection),
         })
       : null;
   const composerBannerItems = (() => {

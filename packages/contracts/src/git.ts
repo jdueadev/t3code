@@ -182,6 +182,8 @@ export const VcsRemoveWorktreeInput = Schema.Struct({
   cwd: TrimmedNonEmptyStringSchema,
   path: TrimmedNonEmptyStringSchema,
   force: Schema.optional(Schema.Boolean),
+  /** Removes it even while processes run from inside it; the server logs the override. */
+  ignoreRunningProcesses: Schema.optional(Schema.Boolean),
 });
 export type VcsRemoveWorktreeInput = typeof VcsRemoveWorktreeInput.Type;
 
@@ -371,6 +373,8 @@ export const GitCommandFailureReason = Schema.Literals([
   "ref_not_found",
   "remote_unreachable",
   "tag_would_be_clobbered",
+  /** A process runs from inside the worktree being removed. */
+  "worktree_in_use",
 ]);
 export type GitCommandFailureReason = typeof GitCommandFailureReason.Type;
 
