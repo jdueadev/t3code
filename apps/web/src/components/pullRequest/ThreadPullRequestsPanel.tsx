@@ -1,11 +1,18 @@
-import type { ProjectId, ScopedThreadRef, ThreadPullRequestLink } from "@t3tools/contracts";
+import type {
+  ProjectId,
+  PullRequestRef,
+  ScopedThreadRef,
+  ThreadPullRequestLink,
+} from "@t3tools/contracts";
 import {
   sourceControlClients,
   UNKNOWN_SOURCE_CONTROL_CLIENT,
 } from "@t3tools/client-runtime/source-control-clients";
 import {
   type PullRequestListLine,
+  type PullRequestStackEdit,
   pullRequestListLines,
+  pullRequestStackEditLabel,
   resolveThreadPullRequestChains,
   visibleThreadPullRequests,
 } from "@t3tools/client-runtime/thread-pull-requests";
@@ -17,6 +24,7 @@ import {
   MoreHorizontalIcon,
   PlusIcon,
 } from "lucide-react";
+import { useAtomValue } from "@effect/atom-react";
 import { LegendList } from "@legendapp/list/react";
 import { memo, useState } from "react";
 
@@ -26,18 +34,23 @@ import {
 } from "~/components/chat/composerMentionDrag";
 import { writeTextToClipboard } from "~/hooks/useCopyToClipboard";
 import { findProjectForChangeRequest } from "@t3tools/client-runtime/change-request-links";
+import { requestConfirmDialog } from "~/confirmDialog";
 import { useOpenPrLink } from "~/lib/openPullRequestLink";
 import { cn } from "~/lib/utils";
 import { useShortcutModifierState } from "~/shortcutModifierState";
 import { useProjects, useServerConfigs, useThreadShell } from "~/state/entities";
 import { PullRequestChangeBreakdownStat } from "./PullRequestChangeBreakdownStat";
 import { PullRequestsUnavailableState } from "./PullRequestsUnavailableState";
+import { squashAtomCommandFailure } from "@t3tools/client-runtime/state/runtime";
+import { pullRequestEnvironment } from "~/state/pullRequests";
+import { useEnvironmentQuery } from "~/state/query";
 import { threadEnvironment } from "~/state/threads";
 import { useAtomCommand } from "~/state/use-atom-command";
 import { RelativeTime } from "~/components/RelativeTime";
 import { Button } from "../ui/button";
 import { Menu, MenuItem, MenuPopup, MenuTrigger } from "../ui/menu";
 import { MiddleTruncate } from "../ui/middle-truncate";
+import { toastManager } from "../ui/toast";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 import { openLinkPullRequestDialog } from "./LinkPullRequestDialog";
 import {
@@ -53,6 +66,7 @@ import {
   PullRequestReviewDecisionGlyph,
   pullRequestChecksStatePresentation,
 } from "./pullRequestPresentation";
+import { readableFailure } from "./pullRequestDetail.logic";
 import { PullRequestGlyph } from "./pullRequestIcons";
 import { pullRequestQuickActions } from "./pullRequestList.logic";
 import { PullRequestSpeedActions, PullRequestSpeedModeContext } from "./PullRequestSpeedActions";
@@ -85,6 +99,30 @@ function ChecksGlyph({
   );
 }
 
+// Mounted with the open menu, so only the row being acted on reads its write access.
+function StackEditMenuItem({
+  environmentId,
+  reference,
+  edit,
+  onSelect,
+}: {
+  environmentId: ScopedThreadRef["environmentId"];
+  reference: PullRequestRef;
+  edit: PullRequestStackEdit;
+  onSelect: () => void;
+}) {
+  const detail = useEnvironmentQuery(
+    pullRequestEnvironment.detail({ environmentId, input: reference }),
+  ).data;
+  if (detail !== null && detail.viewerPermissions.stackEdit !== true) return null;
+  return (
+    <MenuItem disabled={detail === null} onClick={onSelect}>
+      <PullRequestGlyph.stack className="size-3.5" />
+      {pullRequestStackEditLabel(edit)}
+    </MenuItem>
+  );
+}
+
 function LinkRowImpl({
   line,
   threadRef,
@@ -92,6 +130,7 @@ function LinkRowImpl({
   speedMode,
   onUnlink,
   onSetWatching,
+  onEditStack,
 }: {
   line: PullRequestListLine;
   threadRef: ScopedThreadRef;
@@ -99,6 +138,9 @@ function LinkRowImpl({
   speedMode: boolean;
   onUnlink: (link: ThreadPullRequestLink) => void;
   onSetWatching: ((link: ThreadPullRequestLink, watching: boolean) => void) | null;
+  onEditStack:
+    | ((link: ThreadPullRequestLink, projectId: ProjectId, edit: PullRequestStackEdit) => void)
+    | null;
 }) {
   const openPrLink = useOpenPrLink(threadRef);
   const [menuOpen, setMenuOpen] = useState(false);
@@ -113,6 +155,7 @@ function LinkRowImpl({
   const linkHost =
     sourceControlClients.findByChangeRequestUrl(link.url) ?? UNKNOWN_SOURCE_CONTROL_CLIENT;
   const linkHostActions = linkHost.changeRequestActions;
+  const stackEdit = linkHost.changeRequestStackEdits === true ? line.stackEdit : null;
   const actionEntry =
     projectId !== null && snapshot !== null && snapshot.state !== "merged"
       ? {
@@ -336,6 +379,19 @@ function LinkRowImpl({
                 {watching ? "Stop watching" : "Watch for changes"}
               </MenuItem>
             ) : null}
+            {onEditStack !== null && projectId !== null && stackEdit !== null ? (
+              <StackEditMenuItem
+                environmentId={threadRef.environmentId}
+                reference={{
+                  projectId,
+                  host: link.host,
+                  repository: link.repository,
+                  number: link.number,
+                }}
+                edit={stackEdit}
+                onSelect={() => onEditStack(link, projectId, stackEdit)}
+              />
+            ) : null}
             <MenuItem onClick={() => onUnlink(link)}>
               <PullRequestGlyph.unlink className="size-3.5" />
               {link.source === "stack" ? "Dismiss from thread" : "Unlink from thread"}
@@ -422,8 +478,78 @@ function EnabledThreadPullRequestsPanel({ threadRef }: { threadRef: ScopedThread
     });
   };
 
+  const editStack = useAtomCommand(pullRequestEnvironment.editStack, { reportFailure: false });
+  const handleEditStack = async (
+    link: ThreadPullRequestLink,
+    projectId: ProjectId,
+    edit: PullRequestStackEdit,
+  ) => {
+    const unstack = edit.kind === "unstack";
+    if (
+      unstack &&
+      !(
+        (await requestConfirmDialog(
+          `Unstack #${edit.stackNumber}? Its layers stay open as separate pull requests. Merged and queued layers stay stacked.`,
+        )) ?? true
+      )
+    )
+      return;
+    const toastId = toastManager.add({
+      type: "loading",
+      title: unstack ? "Unstacking..." : "Stacking pull requests...",
+    });
+    const result = await editStack({
+      environmentId: threadRef.environmentId,
+      input: {
+        projectId,
+        host: link.host,
+        repository: link.repository,
+        number: link.number,
+        edit: unstack ? edit : { kind: "link", numbers: edit.numbers },
+      },
+    });
+    if (result._tag === "Failure") {
+      toastManager.update(toastId, {
+        type: "error",
+        title: unstack ? "Could not unstack" : "Could not stack the pull requests",
+        description: readableFailure(
+          squashAtomCommandFailure(result),
+          unstack
+            ? "The host refused. Merged and queued layers stay stacked."
+            : "The host refused. Each pull request must be open and based on the branch of the one below it.",
+        ),
+      });
+      return;
+    }
+    const { stack } = result.value;
+    toastManager.update(toastId, {
+      type: "success",
+      title: unstack
+        ? "Unstacked"
+        : stack === null
+          ? "Stacked"
+          : `Stack #${stack.number} has ${stack.layers.length} layers`,
+      ...(unstack && stack !== null
+        ? {
+            description: `${stack.layers.length} merged or queued layers stay stacked.`,
+          }
+        : {}),
+    });
+  };
+  const mayEditStack = useAtomValue(
+    pullRequestEnvironment.editStack.permissionAtom(threadRef.environmentId),
+  );
+  const supportsStackEdits = mayEditStack && capabilities?.pullRequestStackEdits === true;
+
   // Legend rows update only for data/extraData changes; include all external inputs.
-  const rowInputs = { speedMode, environmentProjects, capabilities, supportsWatch, thread };
+  const rowInputs = {
+    speedMode,
+    environmentProjects,
+    capabilities,
+    supportsWatch,
+    supportsStackEdits,
+    thread,
+  };
 
   if (linkCount === 0) {
     return (
@@ -465,6 +591,7 @@ function EnabledThreadPullRequestsPanel({ threadRef }: { threadRef: ScopedThread
               speedMode={speedMode}
               onUnlink={handleUnlink}
               onSetWatching={supportsWatch ? handleSetWatching : null}
+              onEditStack={supportsStackEdits ? handleEditStack : null}
             />
           )}
           estimatedItemSize={44}

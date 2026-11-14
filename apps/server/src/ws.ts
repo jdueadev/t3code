@@ -2778,6 +2778,8 @@ export const layerWsRpc = (
               ),
             ),
           ),
+        [WS_METHODS.pullRequestsEditStack]: (input) =>
+          withPullRequestViewer(input, pullRequests.editStack(input)),
         [WS_METHODS.pullRequestsUpdate]: (input) =>
           withPullRequestViewer(input, pullRequests.update(input)),
         [WS_METHODS.pullRequestsComment]: (input) =>

@@ -12,7 +12,11 @@ import * as Schema from "effect/Schema";
 
 import * as GitHubRest from "./GitHubRest.ts";
 import * as GitHubGraphQlClient from "./gitHubGraphQlClient.ts";
-import { decodePullRequestStacksJson, toCanWrite } from "./gitHubPullRequestJson.ts";
+import {
+  decodePullRequestStacksJson,
+  toCanWrite,
+  type GitHubPullRequestStack,
+} from "./gitHubPullRequestJson.ts";
 import { cascadeRebaseStack } from "./githubStackRebase.ts";
 import { StackActionsGraphQLGroup } from "./stackActions.graphql.ts";
 
@@ -89,7 +93,17 @@ export class GitHubStackRebaseFailedError extends Schema.TaggedError<GitHubStack
   }
 }
 
+export class GitHubStackLinkRefusedError extends Schema.TaggedError<GitHubStackLinkRefusedError>()(
+  "GitHubStackLinkRefusedError",
+  { repository: Schema.String, stackNumber: Schema.Int },
+) {
+  override get message(): string {
+    return `Some of these pull requests are already in stack #${this.stackNumber}. A stack only grows from its top: list its layers first, bottom to top, then the ones to add.`;
+  }
+}
+
 export type GitHubStackActionError =
+  | GitHubStackLinkRefusedError
   | GitHubStackChangedError
   | GitHubStackUnsupportedError
   | GitHubStackResponseInvalidError
@@ -265,4 +279,66 @@ export const runGitHubStackAction = Effect.fn("runGitHubStackAction")(function* 
   if (result.status === "pending") return yield* new GitHubStackMergePendingError({ ...identity });
   if (result.status === "failed")
     return yield* new GitHubStackMergeRejectedError({ ...identity, cause: result });
+});
+
+/** GitHub checks the chain itself: each pull request's base must be the head of the one below. */
+export const editGitHubStack = Effect.fn("editGitHubStack")(function* (input: {
+  repository: string;
+  host: string;
+  edit:
+    | { readonly kind: "link"; readonly numbers: ReadonlyArray<number> }
+    | { readonly kind: "unstack"; readonly stackNumber: number };
+}) {
+  const api = yield* GitHubRest.GitHubRest;
+  const { edit, host } = input;
+  const operation = "editGitHubStack";
+  const stacks = `repos/${input.repository}/stacks`;
+  const decode = (
+    body: string,
+    stackNumber: number,
+  ): Effect.Effect<GitHubPullRequestStack | null, GitHubStackResponseInvalidError> => {
+    const decoded = decodePullRequestStacksJson(body);
+    return Result.isFailure(decoded)
+      ? Effect.fail(
+          new GitHubStackResponseInvalidError({
+            repository: input.repository,
+            number: edit.kind === "link" ? edit.numbers[0]! : stackNumber,
+            stackNumber,
+            cause: decoded.failure,
+          }),
+        )
+      : Effect.succeed(decoded.success);
+  };
+  const write = (path: string, stackNumber: number, pullRequests?: ReadonlyArray<number>) =>
+    api
+      .rest({
+        host,
+        operation,
+        method: "POST",
+        path,
+        ...(pullRequests === undefined ? {} : { body: { pull_requests: pullRequests } }),
+      })
+      .pipe(
+        // Unstacking the last open layers dissolves the stack, which GitHub answers with no body.
+        Effect.flatMap((reply) =>
+          reply.body.trim() === "" ? Effect.succeed(null) : decode(`[${reply.body}]`, stackNumber),
+        ),
+      );
+  if (edit.kind === "unstack")
+    return yield* write(`${stacks}/${edit.stackNumber}/unstack`, edit.stackNumber);
+  const numbers = [...new Set(edit.numbers)];
+  const read = yield* api.rest({ host, operation, path: `${stacks}?pull_request=${numbers[0]}` });
+  const existing = yield* decode(read.body, 0);
+  if (existing === null) return yield* write(stacks, 0, numbers);
+  const members = existing.layers.map((layer) => layer.number);
+  const top = numbers.indexOf(members.at(-1)!);
+  if (top === -1 || numbers.slice(0, top).some((number) => !members.includes(number)))
+    return yield* new GitHubStackLinkRefusedError({
+      repository: input.repository,
+      stackNumber: existing.number,
+    });
+  const added = numbers.slice(top + 1);
+  return added.length === 0
+    ? existing
+    : yield* write(`${stacks}/${existing.number}/add`, existing.number, added);
 });

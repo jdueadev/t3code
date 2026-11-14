@@ -894,6 +894,9 @@ it.effect(
             Effect.sync(() => {
               mutations.push({ environment, expectedAccountId: input.expectedAccountId });
             }),
+          [WS_METHODS.serverGetConfig]: () => Effect.succeed({ environment: { capabilities: {} } }),
+          [WS_METHODS.pullRequestsEditStack]: () =>
+            Effect.succeed({ stack: null, affected: [7, 8, 9] }),
           [WS_METHODS.pullRequestsInvalidate]: (input: unknown) =>
             Effect.sync(() => {
               invalidations.push({ environment, input });
@@ -929,6 +932,18 @@ it.effect(
         );
 
         invalidations.length = 0;
+        yield* route(WS_METHODS.pullRequestsEditStack, {
+          ...reference,
+          edit: { kind: "unstack", stackNumber: 50 },
+        });
+        for (const number of [8, 9]) {
+          expect(invalidations).toContainEqual({
+            environment: "origin",
+            input: { reference: expect.objectContaining({ ...reference, number }) },
+          });
+        }
+
+        invalidations.length = 0;
         const refresh = createPullRequestRouter();
         yield* refresh(WS_METHODS.pullRequestsInvalidate, { reference });
         expect(invalidations).toContainEqual({
@@ -946,6 +961,95 @@ it.effect(
         Effect.provideService(EnvironmentSupervisor.EnvironmentSupervisor, supervisor),
       );
     }),
+);
+
+it.effect("resyncs every stack layer a routed edit touched, even when the edit fails", () =>
+  Effect.gen(function* () {
+    let editFails = false;
+    const edits: string[] = [];
+    const invalidations: { environment: string; input: unknown }[] = [];
+    const clientFor = (local: boolean) => {
+      const environment = local ? "local" : "origin";
+      return {
+        [local ? WS_METHODS.pullRequestsRoutingIdentity : WS_METHODS.pullRequestsRouting]: () =>
+          Effect.succeed({
+            host: "github.com",
+            provider: "github",
+            viewer: "maria-rcks",
+            accountId: "123",
+          }),
+        [WS_METHODS.pullRequestsSummary]: () => (local ? Effect.succeed(null) : Effect.never),
+        [WS_METHODS.serverGetConfig]: () =>
+          Effect.succeed({ environment: { capabilities: { pullRequestStackEdits: true } } }),
+        [WS_METHODS.pullRequestsEditStack]: () =>
+          Effect.sync(() => edits.push(environment)).pipe(
+            Effect.andThen(
+              editFails
+                ? Effect.fail(new MutationRefused())
+                : Effect.succeed({ stack: null, affected: [7, 8, 9] }),
+            ),
+          ),
+        [WS_METHODS.pullRequestsInvalidate]: (input: unknown) =>
+          Effect.sync(() => {
+            invalidations.push({ environment, input });
+          }),
+      } as unknown as WsRpcProtocolClient;
+    };
+    const { environmentRegistry, supervisor } = yield* makeTestRuntime(
+      clientFor(false),
+      clientFor(true),
+    );
+    const reference = { projectId: ProjectId.make("project-1"), repository: "acme/web", number: 7 };
+    const route = createPullRequestRouter();
+    const layerReached = (environment: string, number: number) =>
+      invalidations.some(
+        (entry) =>
+          entry.environment === environment &&
+          typeof entry.input === "object" &&
+          entry.input !== null &&
+          "reference" in entry.input &&
+          (entry.input.reference as { number: number }).number === number,
+      );
+    yield* Effect.gen(function* () {
+      // The first routed operation is an unstack the other environment applies and then fails.
+      editFails = true;
+      yield* Effect.exit(
+        route(WS_METHODS.pullRequestsEditStack, {
+          ...reference,
+          edit: { kind: "unstack", stackNumber: 50 },
+        }),
+      );
+      expect(edits).toEqual(["local"]);
+      expect(layerReached("origin", 7)).toBe(true);
+      editFails = false;
+
+      // Only #8 was read through the local environment; the edit is made from #7.
+      yield* route(WS_METHODS.pullRequestsSummary, { ...reference, number: 8 });
+      invalidations.length = 0;
+      yield* route(WS_METHODS.pullRequestsEditStack, {
+        ...reference,
+        edit: { kind: "unstack", stackNumber: 50 },
+      });
+      expect(layerReached("local", 8)).toBe(true);
+
+      invalidations.length = 0;
+      edits.length = 0;
+      editFails = true;
+      yield* Effect.exit(
+        route(WS_METHODS.pullRequestsEditStack, {
+          ...reference,
+          edit: { kind: "link", numbers: [7, 8, 9] },
+        }),
+      );
+      expect(edits).toEqual(["local"]);
+      for (const number of [7, 8, 9]) expect(layerReached("origin", number)).toBe(true);
+    }).pipe(
+      Effect.provideService(EnvironmentRegistry.EnvironmentRegistry, environmentRegistry),
+      Effect.provideService(PullRequestRoutingPermissions, trustedRouting),
+      Effect.provideService(RpcPermissionGuard, { authorize: () => Effect.void }),
+      Effect.provideService(EnvironmentSupervisor.EnvironmentSupervisor, supervisor),
+    );
+  }),
 );
 
 it.effect("keeps concurrent diff file reads on different hosts separate", () =>

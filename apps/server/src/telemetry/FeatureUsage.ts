@@ -63,6 +63,7 @@ const METHOD_FEATURES: Readonly<Record<string, (payload: Payload) => FeatureUsag
     use("git.stacked_action", literal(payload, "action")),
   [WS_METHODS.pullRequestsRunAction]: (payload) =>
     use("pull_request.action", literal(payload, "action")),
+  [WS_METHODS.pullRequestsEditStack]: () => ({ feature: "pull_request.stack_edit" }),
   [WS_METHODS.pullRequestsSubmitReview]: () => ({ feature: "pull_request.review" }),
   [WS_METHODS.pullRequestsComment]: () => ({ feature: "pull_request.comment" }),
   [WS_METHODS.scheduledTasksUpsert]: () => ({ feature: "scheduled_task.save" }),

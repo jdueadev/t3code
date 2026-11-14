@@ -2,6 +2,8 @@ import {
   WS_METHODS,
   PullRequestRef,
   PullRequestInvalidateInput,
+  PullRequestStackEditInput,
+  PullRequestStackEditResult,
   PullRequestState,
   type EnvironmentId,
   type PullRequestRoutingResult,
@@ -50,6 +52,7 @@ const reads = new Set<string>([
 const writes = new Set<string>([
   WS_METHODS.pullRequestsSetFilesViewed,
   WS_METHODS.pullRequestsRunAction,
+  WS_METHODS.pullRequestsEditStack,
   WS_METHODS.pullRequestsUpdate,
   WS_METHODS.pullRequestsComment,
   WS_METHODS.pullRequestsUpdateComment,
@@ -65,6 +68,8 @@ const hasState = Schema.is(
   Schema.Struct({ state: PullRequestState, isDraft: Schema.optional(Schema.Boolean) }),
 );
 const isInvalidation = Schema.is(PullRequestInvalidateInput);
+const isStackEditResult = Schema.is(PullRequestStackEditResult);
+const isStackEditInput = Schema.is(PullRequestStackEditInput);
 const readTimeout = (environmentId: EnvironmentId) =>
   Effect.timeoutOrElse({
     duration: "30 seconds",
@@ -281,39 +286,72 @@ export function createPullRequestRouter() {
       ref.repository.toLowerCase(),
       String(ref.number),
     ]);
-    const invalidateReaders = Effect.suspend(() => {
-      if (!writes.has(tag) || used.size === 0) return Effect.void;
-      const targets = new Map<EnvironmentId, PullRequestRef[]>([
-        [origin.target.environmentId, [ref]],
-      ]);
-      for (const entry of used.values()) {
-        if (entry.origin !== origin.target.environmentId || !matchesReference(entry.reference, ref))
-          continue;
-        for (const target of [...entry.targets, origin.target.environmentId]) {
-          const refs = targets.get(target) ?? [];
-          if (!refs.some((existing) => existing.host === entry.reference.host))
-            refs.push(entry.reference);
-          targets.set(target, refs);
+    // A stack edit moves every layer, and the server that made it only resyncs its own threads.
+    // Each layer's reference reaches the origin, whose invalidate handler resyncs its saved link.
+    const invalidateReaders = (result?: unknown) =>
+      Effect.suspend(() => {
+        // A stack edit may have run elsewhere and failed before any read was recorded.
+        if (!writes.has(tag) || (used.size === 0 && tag !== WS_METHODS.pullRequestsEditStack))
+          return Effect.void;
+        // A failed edit may still have applied, so the layers the input names are resynced too.
+        const named =
+          tag !== WS_METHODS.pullRequestsEditStack
+            ? []
+            : isStackEditResult(result)
+              ? result.affected
+              : isStackEditInput(input) && input.edit.kind === "link"
+                ? input.edit.numbers
+                : [];
+        const layers = [...new Set(named)].filter((number) => number !== ref.number);
+        const withLayers = (reference: PullRequestRef) => [
+          reference,
+          ...layers.map((number) => ({ ...reference, number })),
+        ];
+        const targets = new Map<EnvironmentId, PullRequestRef[]>([
+          [origin.target.environmentId, withLayers(ref)],
+        ]);
+        for (const entry of used.values()) {
+          if (
+            entry.origin !== origin.target.environmentId ||
+            ![ref.number, ...layers].some((number) =>
+              matchesReference(entry.reference, { ...ref, number }),
+            )
+          )
+            continue;
+          const reference = { ...entry.reference, number: ref.number };
+          for (const target of [...entry.targets, origin.target.environmentId]) {
+            const refs = targets.get(target) ?? [];
+            if (
+              !refs.some(
+                (existing) => existing.host === reference.host && existing.number === ref.number,
+              )
+            )
+              refs.push(...withLayers(reference));
+            targets.set(target, refs);
+          }
         }
-      }
-      return Effect.forEach(
-        targets,
-        ([target, refs]) =>
-          invalidateTarget(registry, origin.target.environmentId, target, [
-            ...refs.map((reference) => ({
-              reference,
-              ...(tag === WS_METHODS.pullRequestsSetFilesViewed ? { filesViewedOnly: true } : {}),
-            })),
-            ...(tag === WS_METHODS.pullRequestsSetFilesViewed ? [] : [{}]),
-          ]),
-        { concurrency: 4, discard: true },
-      );
-    });
-    // A failed viewed-files batch may have applied some paths. Other writes invalidate on success.
+        return Effect.forEach(
+          targets,
+          ([target, refs]) =>
+            invalidateTarget(registry, origin.target.environmentId, target, [
+              ...refs.map((reference) => ({
+                reference,
+                ...(tag === WS_METHODS.pullRequestsSetFilesViewed ? { filesViewedOnly: true } : {}),
+              })),
+              ...(tag === WS_METHODS.pullRequestsSetFilesViewed ? [] : [{}]),
+            ]),
+          { concurrency: 4, discard: true },
+        );
+      });
+    // A failed viewed-files batch or stack edit may have applied. Other writes invalidate on success.
     const finish = (operation: ReturnType<typeof request<T>>) =>
-      tag === WS_METHODS.pullRequestsSetFilesViewed
-        ? operation.pipe(Effect.ensuring(invalidateReaders))
-        : operation.pipe(Effect.tap(() => invalidateReaders));
+      tag === WS_METHODS.pullRequestsSetFilesViewed || tag === WS_METHODS.pullRequestsEditStack
+        ? operation.pipe(
+            Effect.onExit((exit) =>
+              invalidateReaders(Exit.isSuccess(exit) ? exit.value : undefined),
+            ),
+          )
+        : operation.pipe(Effect.tap((result) => invalidateReaders(result)));
     const alternatives = [];
     for (const [id, entry] of entries) {
       if (id === origin.target.environmentId) continue;
@@ -328,9 +366,15 @@ export function createPullRequestRouter() {
         )
         .pipe(Effect.orElseSucceed(() => Option.none()));
       if (Option.isNone(connected)) continue;
-      if (tag === WS_METHODS.pullRequestsChecks) {
+      const capability =
+        tag === WS_METHODS.pullRequestsChecks
+          ? "pullRequestChecks"
+          : tag === WS_METHODS.pullRequestsEditStack
+            ? "pullRequestStackEdits"
+            : undefined;
+      if (capability !== undefined) {
         const supported = yield* connected.value.initialConfig.pipe(
-          Effect.map((config) => config.environment.capabilities.pullRequestChecks === true),
+          Effect.map((config) => config.environment.capabilities[capability] === true),
           Effect.timeout("2 seconds"),
           Effect.catchCause((cause) =>
             Cause.hasInterrupts(cause) ? Effect.interrupt : Effect.succeed(false),

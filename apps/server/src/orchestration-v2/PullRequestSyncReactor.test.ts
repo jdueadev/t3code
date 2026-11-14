@@ -425,6 +425,7 @@ const stackLayer = (number: number) => ({
  */
 function makeGrowingStack() {
   let layers = [stackLayer(18), stackLayer(20)];
+  let dissolved = false;
   const entries = new Map<number, { readonly layers: typeof layers; expiresAt: number }>();
   const invalidated: Array<number> = [];
   const stackOf = (stackLayers: typeof layers): PullRequestStack => ({
@@ -439,7 +440,10 @@ function makeGrowingStack() {
     grow: () => {
       layers = [...layers, stackLayer(83)];
     },
-    read: () => Effect.sync(() => stackOf(layers)),
+    dissolve: () => {
+      dissolved = true;
+    },
+    read: () => Effect.sync(() => (dissolved ? null : stackOf(layers))),
     invalidate: (({ reference }) =>
       Effect.sync(() => {
         invalidated.push(reference?.number ?? -1);
@@ -1516,6 +1520,51 @@ describe("PullRequestSyncReactor", () => {
     }),
   );
 
+  it.effect(
+    "re-reads settled threads' other layers, in any project, once a stack is dissolved",
+    () =>
+      Effect.gen(function* () {
+        yield* TestClock.setTime(Date.parse(NOW));
+        const stack = makeGrowingStack();
+        const fixture = yield* makeHarness({
+          snapshot: makeSnapshot([
+            makeThread("one", { pullRequests: [makeLink(18), makeLink(20)] }),
+            makeThread("two", {
+              projectId: ProjectId.make("second-project"),
+              pullRequests: [makeLink(20)],
+            }),
+          ]),
+          stack: stack.read,
+        });
+
+        yield* Effect.gen(function* () {
+          const reactor = yield* startAndSweep(fixture);
+          yield* applyRecordedSyncs(fixture);
+          yield* Ref.update(fixture.snapshots, (snapshot) => ({
+            ...snapshot,
+            threads: snapshot.threads.map((thread) => ({
+              ...thread,
+              settledOverride: "settled" as const,
+              settledAt: "2026-08-21T00:00:00.000Z",
+            })),
+          }));
+
+          // Only #18 is asked to resync, as when another environment unstacked it.
+          stack.dissolve();
+          yield* requestAndApply(fixture, reactor, 18);
+          yield* sweepAgain(fixture, reactor);
+          yield* applyRecordedSyncs(fixture);
+
+          assert.deepStrictEqual(yield* storedStackLayers(fixture), [
+            [18, undefined],
+            [20, undefined],
+          ]);
+          const other = (yield* Ref.get(fixture.snapshots)).threads[1]!.pullRequests[0]!;
+          assert.strictEqual(other.stack, null);
+        }).pipe(Effect.provide(fixture.layer));
+      }),
+  );
+
   it.effect("reads past the cache when a sibling flags a member during its summary read", () =>
     Effect.gen(function* () {
       yield* TestClock.setTime(Date.parse(NOW));
@@ -2000,6 +2049,24 @@ describe("PullRequestSyncReactor", () => {
       output:
         "https://github.com/owner/repository/pull/124\nhttps://github.com/owner/repository/pull/125",
       linked: [124, 125],
+    },
+    {
+      name: "the new layers of a submitted stack, not the one it only retargeted",
+      input: "git push -q; timeout 120 gh stack submit --auto",
+      output: [
+        "Pushing to origin...",
+        "✓ Created PR #124 (https://github.com/owner/repository/pull/124) for a",
+        "✓ Created PR #125 (https://github.com/owner/repository/pull/125) for b",
+        "✓ Updated base branch for PR #120 (https://github.com/owner/repository/pull/120) to a",
+        "✓ Stack created on GitHub with 3 PRs",
+      ].join("\n"),
+      linked: [124, 125],
+    },
+    {
+      name: "a stack command that opens nothing",
+      input: "gh stack view --short",
+      output: "✓ Created PR #124 (https://github.com/owner/repository/pull/124) for a",
+      linked: [],
     },
     {
       name: "the first pull request of a new repository",

@@ -16,12 +16,19 @@ import {
   capitalizeTerm,
   sourceControlClients,
 } from "@t3tools/client-runtime/source-control-clients";
-import { AuthOrchestrationOperateScope, type ThreadPullRequestLink } from "@t3tools/contracts";
+import {
+  pullRequestStackEditLabel,
+  type PullRequestListLine,
+} from "@t3tools/client-runtime/thread-pull-requests";
+import { useAtomValue } from "@effect/atom-react";
+import { AuthOrchestrationOperateScope } from "@t3tools/contracts";
 import * as Clipboard from "expo-clipboard";
 
 import * as Dialog from "../../components/ui/Dialog";
 import { tryOpenExternalUrl } from "../../lib/openExternalUrl";
 import type { MenuProps } from "../../components/ui/Menu.types";
+import { composerPullRequests } from "../../state/pull-requests";
+import { PullRequestGlyph } from "../pull-requests/pullRequestGlyphs";
 import type { EnvironmentRuntimeState } from "../../state/remote-runtime-types";
 import { useEnvironmentScope } from "../../state/session";
 import { threadEnvironment } from "../../state/threads";
@@ -53,6 +60,16 @@ export function useLinkedPullRequestActions(input: {
   const link = useAtomCommand(threadEnvironment.linkPullRequest, { reportFailure: false });
   const unlink = useAtomCommand(threadEnvironment.unlinkPullRequest, { reportFailure: false });
   const watch = useAtomCommand(threadEnvironment.watchPullRequest, { reportFailure: false });
+  const editStack = useAtomCommand(composerPullRequests.editStack, { reportFailure: false });
+  const mayEditStack = useAtomValue(
+    composerPullRequests.editStack.permissionAtom(thread?.environmentId ?? null),
+  );
+  const canEditStack = mayEditStack && capabilities?.pullRequestStackEdits === true;
+  const stackEditOf = (line: PullRequestListLine) =>
+    canEditStack &&
+    sourceControlClients.findByChangeRequestUrl(line.link.url)?.changeRequestStackEdits === true
+      ? line.stackEdit
+      : null;
 
   const run = async (
     failureTitle: string,
@@ -114,7 +131,22 @@ export function useLinkedPullRequestActions(input: {
     });
   };
 
-  const menuActions = (link: ThreadPullRequestLink): MenuAction[] => {
+  const stackEditTarget = (line: PullRequestListLine) =>
+    thread === null || stackEditOf(line) === null
+      ? null
+      : composerPullRequests.detail({
+          environmentId: thread.environmentId,
+          input: {
+            projectId: thread.projectId,
+            host: line.link.host,
+            repository: line.link.repository,
+            number: line.link.number,
+          },
+        });
+
+  const menuActions = (line: PullRequestListLine, mayStack: boolean): MenuAction[] => {
+    const { link } = line;
+    const stackEdit = mayStack ? stackEditOf(line) : null;
     const open = link.snapshot === null || link.snapshot.state === "open";
     const watching = link.watch !== undefined;
     return [
@@ -129,6 +161,16 @@ export function useLinkedPullRequestActions(input: {
             },
           ]
         : []),
+      ...(stackEdit === null
+        ? []
+        : [
+            {
+              id: "stack-edit",
+              title: pullRequestStackEditLabel(stackEdit),
+              image: PullRequestGlyph.stack,
+              ...(stackEdit.kind === "unstack" ? { attributes: { destructive: true } } : {}),
+            },
+          ]),
       ...(canEdit
         ? [
             {
@@ -142,8 +184,39 @@ export function useLinkedPullRequestActions(input: {
     ];
   };
 
-  const onMenuAction = (link: ThreadPullRequestLink, action: string) => {
-    if (action === "copy") void Clipboard.setStringAsync(link.url);
+  const runStackEdit = (line: PullRequestListLine) => {
+    const edit = stackEditOf(line);
+    if (edit === null || thread === null) return;
+    const { link } = line;
+    const send = () =>
+      void run(
+        edit.kind === "unstack" ? "Couldn't unstack" : `Couldn't stack these ${terminology.plural}`,
+        editStack({
+          environmentId: thread.environmentId,
+          input: {
+            projectId: thread.projectId,
+            host: link.host,
+            repository: link.repository,
+            number: link.number,
+            edit: edit.kind === "unstack" ? edit : { kind: "link", numbers: edit.numbers },
+          },
+        }),
+      );
+    if (edit.kind !== "unstack") return send();
+    Dialog.alert(
+      `Unstack #${edit.stackNumber}?`,
+      `Its layers stay open as separate ${terminology.plural}. Merged and queued layers stay stacked.`,
+      [
+        { text: "Cancel", style: "cancel" },
+        { text: "Unstack", style: "destructive", onPress: send },
+      ],
+    );
+  };
+
+  const onMenuAction = (line: PullRequestListLine, action: string) => {
+    const { link } = line;
+    if (action === "stack-edit") runStackEdit(line);
+    else if (action === "copy") void Clipboard.setStringAsync(link.url);
     else if (action === "browser")
       void tryOpenExternalUrl(link.url, "pull-request").then((opened) => {
         if (!opened) {
@@ -171,7 +244,14 @@ export function useLinkedPullRequestActions(input: {
     else if (action === "unlink") setLinked(link, false);
   };
 
-  return { canLink: canEdit, terminology, promptLink, menuActions, onMenuAction };
+  return {
+    canLink: canEdit,
+    terminology,
+    promptLink,
+    stackEditTarget,
+    menuActions,
+    onMenuAction,
+  };
 }
 
 export type LinkedPullRequestActions = ReturnType<typeof useLinkedPullRequestActions>;

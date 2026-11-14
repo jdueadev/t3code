@@ -202,6 +202,8 @@ import {
   PullRequestRoutingIdentityInput,
   PullRequestRoutingIdentityResult,
   PullRequestStack,
+  PullRequestStackEditInput,
+  PullRequestStackEditResult,
   PullRequestLinkedThreadsResult,
   PullRequestSummary,
   PullRequestReviewerCandidateList,
@@ -585,6 +587,7 @@ export const WS_METHODS = {
   pullRequestsChangeBreakdown: "pullRequests.changeBreakdown",
   pullRequestsSetFilesViewed: "pullRequests.setFilesViewed",
   pullRequestsRunAction: "pullRequests.runAction",
+  pullRequestsEditStack: "pullRequests.editStack",
   pullRequestsUpdate: "pullRequests.update",
   pullRequestsComment: "pullRequests.comment",
   pullRequestsUpdateComment: "pullRequests.updateComment",
@@ -1175,6 +1178,12 @@ const WsPullRequestsRunActionRpc = Rpc.make(WS_METHODS.pullRequestsRunAction, {
   payload: PullRequestActionInput,
   // Undefined unless asked for with replyWithSummary, or when the host's reply lacked it.
   success: Schema.UndefinedOr(PullRequestSummary),
+  error: PullRequestRpcError,
+});
+
+const WsPullRequestsEditStackRpc = Rpc.make(WS_METHODS.pullRequestsEditStack, {
+  payload: PullRequestStackEditInput,
+  success: PullRequestStackEditResult,
   error: PullRequestRpcError,
 });
 
@@ -2195,6 +2204,7 @@ export const WsRpcGroup = RpcGroup.make(
   WsPullRequestsChangeBreakdownRpc,
   WsPullRequestsSetFilesViewedRpc,
   WsPullRequestsRunActionRpc,
+  WsPullRequestsEditStackRpc,
   WsPullRequestsUpdateRpc,
   WsPullRequestsCommentRpc,
   WsPullRequestsUpdateCommentRpc,

@@ -894,6 +894,13 @@ export function createPullRequestEnvironmentAtoms<R, E>(
       scheduler: commandScheduler,
       concurrency: serialPerEnvironment,
     }),
+    editStack: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:pull-requests:edit-stack",
+      tag: WS_METHODS.pullRequestsEditStack,
+      execute: (input) => routedRequest(WS_METHODS.pullRequestsEditStack, input),
+      scheduler: commandScheduler,
+      concurrency: serialPerEnvironment,
+    }),
     update: createEnvironmentRpcCommand(runtime, {
       label: "environment-data:pull-requests:update",
       tag: WS_METHODS.pullRequestsUpdate,

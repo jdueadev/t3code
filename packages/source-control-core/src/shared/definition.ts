@@ -275,6 +275,8 @@ export interface SourceControlDefinition {
    * declares in `capabilities.actions`.
    */
   readonly changeRequestActions: ReadonlySet<PullRequestAction>;
+  /** Stacks can be created, added to and dissolved, as `capabilities.stackEdits` declares. */
+  readonly changeRequestStackEdits?: boolean;
   readonly checkoutCommand: (changeRequest: ChangeRequestCheckoutInput) => string | null;
   /**
    * Matches a shell command that merges or closes a change request with this host's CLI, which
@@ -286,6 +288,14 @@ export interface SourceControlDefinition {
    * on a line of its own. Absent for a host with no such CLI.
    */
   readonly changeRequestCreateCommand?: RegExp;
+  /**
+   * A stack CLI whose one command opens any number of change requests: the command, and the
+   * output line that reports each one, capturing its URL. Absent for a host with no such CLI.
+   */
+  readonly changeRequestStackCreateCommand?: {
+    readonly command: RegExp;
+    readonly created: RegExp;
+  };
   readonly authorProfileUrl: (login: string, repositoryUrl: string) => string | null;
   /**
    * The references this host's own renderer links in plain text, such as `#12` or a commit SHA,

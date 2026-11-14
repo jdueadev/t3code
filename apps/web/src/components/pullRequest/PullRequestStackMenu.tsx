@@ -6,8 +6,10 @@ import type {
   PullRequestMergeMethod,
 } from "@t3tools/contracts";
 import { squashAtomCommandFailure } from "@t3tools/client-runtime/state/runtime";
-import { RefreshCwIcon, TriangleAlertIcon } from "lucide-react";
+import { RefreshCwIcon, TriangleAlertIcon, UngroupIcon } from "lucide-react";
+import { useAtomValue } from "@effect/atom-react";
 import { useState } from "react";
+import { requestConfirmDialog } from "~/confirmDialog";
 import { useAtomCommand } from "~/state/use-atom-command";
 import { pullRequestEnvironment } from "~/state/pullRequests";
 import { Button } from "../ui/button";
@@ -38,6 +40,7 @@ export function PullRequestStackMenu({
   stale,
   canMerge,
   canRebase,
+  canUnstack,
   mergeMethod,
   onSelect,
   onActed,
@@ -54,6 +57,7 @@ export function PullRequestStackMenu({
   stale: boolean;
   canMerge: boolean;
   canRebase: boolean;
+  canUnstack: boolean;
   mergeMethod: PullRequestMergeMethod;
   onSelect?: ((reference: PullRequestRef) => void) | undefined;
   onActed: () => void;
@@ -62,6 +66,47 @@ export function PullRequestStackMenu({
   const [confirmation, setConfirmation] = useState<"merge" | "update-branch" | null>(null);
   const [pending, setPending] = useState(false);
   const runAction = useAtomCommand(pullRequestEnvironment.runAction, { reportFailure: false });
+  const editStack = useAtomCommand(pullRequestEnvironment.editStack, { reportFailure: false });
+  const mayEditStack = useAtomValue(pullRequestEnvironment.editStack.permissionAtom(environmentId));
+  const showUnstack = canUnstack && mayEditStack;
+  const unstack = async () => {
+    if (pending) return;
+    if (
+      !(
+        (await requestConfirmDialog(
+          `Unstack #${stack.number}? Its layers stay open as separate ${terminology.plural}. Merged and queued layers stay stacked.`,
+        )) ?? true
+      )
+    )
+      return;
+    setPending(true);
+    const toastId = toastManager.add({ type: "loading", title: "Unstacking..." });
+    const result = await editStack({
+      environmentId,
+      input: { ...reference, edit: { kind: "unstack", stackNumber: stack.number } },
+    });
+    setPending(false);
+    onActed();
+    if (result._tag === "Failure") {
+      toastManager.update(toastId, {
+        type: "error",
+        title: "Could not unstack",
+        description: readableFailure(
+          squashAtomCommandFailure(result),
+          "The host refused. Merged and queued layers stay stacked.",
+        ),
+      });
+      return;
+    }
+    toastManager.update(toastId, {
+      type: "success",
+      title: "Unstacked",
+      description:
+        result.value.stack === null
+          ? `Stack #${stack.number} is dissolved. Its ${terminology.plural} stay open.`
+          : `${hostLabel} kept ${result.value.stack.layers.length} merged or queued layers stacked.`,
+    });
+  };
   const top = stack.layers.at(-1);
   const unmerged = stack.layers.filter((layer) => layer.state !== "merged");
   const hasClosed = unmerged.some((layer) => layer.state !== "open");
@@ -181,7 +226,7 @@ export function PullRequestStackMenu({
               }
             />
           </MenuGroup>
-          {canMerge || canRebase ? (
+          {canMerge || canRebase || showUnstack ? (
             <>
               <MenuSeparator />
               {canMerge ? (
@@ -197,6 +242,15 @@ export function PullRequestStackMenu({
                 >
                   <RefreshCwIcon aria-hidden />
                   Rebase stack
+                </MenuItem>
+              ) : null}
+              {showUnstack ? (
+                <MenuItem
+                  disabled={pending || stale || unmerged.length === 0}
+                  onClick={() => void unstack()}
+                >
+                  <UngroupIcon aria-hidden />
+                  Unstack
                 </MenuItem>
               ) : null}
               {mergeHasClosed || mergeLayers.some((layer) => layer.isDraft) ? (

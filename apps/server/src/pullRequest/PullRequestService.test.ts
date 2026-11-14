@@ -3774,6 +3774,10 @@ it.effect.each([false, true])(
       let mutationFails = false;
       let stackRebase = true;
       let stackActions = true;
+      let stackEdit = true;
+      let stackEdited = 0;
+      let stackEditFails = false;
+      let stackReadFails = false;
       const capabilities = {
         diff: true,
         comment: true,
@@ -3783,6 +3787,7 @@ it.effect.each([false, true])(
         get stackActions() {
           return stackActions;
         },
+        stackEdits: true,
         search: true,
         reactions: true,
         review: FULL_REVIEW,
@@ -3806,6 +3811,7 @@ it.effect.each([false, true])(
               Effect.succeed({
                 actions: [],
                 stackRebase,
+                stackEdit,
                 comment: true,
                 resolve: false,
                 verdicts: [],
@@ -3820,6 +3826,26 @@ it.effect.each([false, true])(
               Effect.gen(function* () {
                 taken++;
                 if (mutationFails) return yield* requestFailed;
+              }),
+            getChangeRequestStack: () =>
+              Effect.gen(function* () {
+                if (stackReadFails) return yield* requestFailed;
+                return {
+                  id: "50",
+                  number: 50,
+                  url: "https://github.com/acme/web/stack/50",
+                  base: "main",
+                  layers: [
+                    { number: 3, headBranch: "a", state: "open" as const },
+                    { number: 4, headBranch: "b", state: "open" as const },
+                  ],
+                };
+              }),
+            editChangeRequestStack: () =>
+              Effect.gen(function* () {
+                stackEdited++;
+                if (stackEditFails) return yield* requestFailed;
+                return null;
               }),
           }),
         ],
@@ -3859,6 +3885,59 @@ it.effect.each([false, true])(
       assert.strictEqual(taken, 2);
       yield* service.summary(unrelated);
       assert.strictEqual(summaryReads, 2);
+      const { projectId, repository, number } = input;
+      const unstack = {
+        ...(crossHost ? { host: "enterprise.test" } : {}),
+        projectId,
+        repository,
+        number,
+        edit: { kind: "unstack" as const, stackNumber: 50 },
+      };
+      stackEdit = false;
+      assert.strictEqual(
+        (yield* Effect.flip(service.editStack(unstack)))._tag,
+        "PullRequestOperationError",
+      );
+      assert.strictEqual(stackEdited, 0);
+      stackEdit = true;
+      const left = { ...unstack, edit: { kind: "unstack" as const, stackNumber: 51 } };
+      assert.strictEqual(
+        (yield* Effect.flip(service.editStack(left)))._tag,
+        "PullRequestOperationError",
+      );
+      stackReadFails = true;
+      yield* Effect.flip(service.editStack(unstack));
+      stackReadFails = false;
+      assert.strictEqual(stackEdited, 0);
+      const resynced = yield* Effect.scoped(
+        Effect.gen(function* () {
+          const changes = yield* service.subscribeStateChanges;
+          assert.deepStrictEqual(yield* service.editStack(unstack), {
+            stack: null,
+            affected: [3, 4],
+          });
+          return yield* Stream.runCollect(Stream.take(changes, 2));
+        }),
+      );
+      assert.deepStrictEqual(
+        Array.from(resynced, (key) => key.number),
+        [3, 4],
+      );
+      assert.strictEqual(stackEdited, 1);
+      yield* service.summary(unrelated);
+      assert.strictEqual(summaryReads, 3);
+      stackEditFails = true;
+      const afterLostAnswer = yield* Effect.scoped(
+        Effect.gen(function* () {
+          const changes = yield* service.subscribeStateChanges;
+          yield* Effect.flip(service.editStack(unstack));
+          return yield* Stream.runCollect(Stream.take(changes, 2));
+        }),
+      );
+      assert.deepStrictEqual(
+        Array.from(afterLostAnswer, (key) => key.number),
+        [3, 4],
+      );
     }),
 );
 

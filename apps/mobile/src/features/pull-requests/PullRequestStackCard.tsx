@@ -1,11 +1,17 @@
+import { useAtomValue } from "@effect/atom-react";
 import { StackActions, useNavigation } from "@react-navigation/native";
+import { squashAtomCommandFailure } from "@t3tools/client-runtime/state/runtime";
+import { AsyncResult } from "effect/reactivity";
 import { useState } from "react";
 import { View } from "react-native";
+import * as Dialog from "../../components/ui/Dialog";
+import { composerPullRequests } from "../../state/pull-requests";
+import { useAtomCommand } from "../../state/use-atom-command";
 import { AppText as Text } from "../../components/ui/AppText";
 import { PullRequestCardGroup, PullRequestCardRow } from "./PullRequestControls";
 import { pullRequestLayerParams } from "./pullRequestStack";
 import { pullRequestStatus } from "./pullRequestStatus";
-import type { PullRequestParams } from "./usePullRequestDiff";
+import { pullRequestTarget, type PullRequestParams } from "./usePullRequestDiff";
 import type { PullRequestStackState } from "./usePullRequestStack";
 import { PullRequestGlyph } from "./pullRequestGlyphs";
 import { withKnownPullRequestSummary } from "../../state/use-thread-pr";
@@ -16,6 +22,12 @@ export function PullRequestStackCard(props: {
 }) {
   const navigation = useNavigation();
   const [expanded, setExpanded] = useState(false);
+  const [unstacking, setUnstacking] = useState(false);
+  const target = pullRequestTarget(props.params);
+  const editStack = useAtomCommand(composerPullRequests.editStack, { reportFailure: false });
+  const mayEditStack = useAtomValue(
+    composerPullRequests.editStack.permissionAtom(target.environmentId),
+  );
   const stack = props.state.stack;
   if (!stack) {
     const summary =
@@ -35,6 +47,34 @@ export function PullRequestStackCard(props: {
     );
   }
   const position = stack.layers.findIndex((layer) => layer.number === props.params.number) + 1;
+  const canUnstack =
+    mayEditStack &&
+    props.state.supportsStackEdits &&
+    props.state.isFresh &&
+    !unstacking &&
+    stack.layers.some((layer) => layer.state === "open");
+  const unstack = async () => {
+    setUnstacking(true);
+    const response = await editStack({
+      ...target,
+      input: { ...target.input, edit: { kind: "unstack", stackNumber: stack.number } },
+    });
+    setUnstacking(false);
+    props.state.refresh();
+    if (AsyncResult.isFailure(response)) {
+      const cause = squashAtomCommandFailure(response);
+      Dialog.alert("Couldn't unstack", cause instanceof Error ? cause.message : "Try again.");
+    }
+  };
+  const confirmUnstack = () =>
+    Dialog.alert(
+      `Unstack #${stack.number}?`,
+      "Its layers stay open as separate pull requests. Merged and queued layers stay stacked.",
+      [
+        { text: "Cancel", style: "cancel" },
+        { text: "Unstack", style: "destructive", onPress: () => void unstack() },
+      ],
+    );
   return (
     <PullRequestCardGroup>
       <PullRequestCardRow
@@ -75,11 +115,20 @@ export function PullRequestStackCard(props: {
                             ),
                           )
                   }
-                  last={index === stack.layers.length - 1}
+                  last={!canUnstack && index === stack.layers.length - 1}
                 />
               </View>
             );
           })}
+          {canUnstack ? (
+            <PullRequestCardRow
+              title="Unstack"
+              icon={PullRequestGlyph.stack}
+              destructive
+              onPress={confirmUnstack}
+              last
+            />
+          ) : null}
           <Text className="px-4 py-3 text-xs text-foreground-muted">
             Base: {stack.base}. Open a layer to review it or merge the stack through that layer.
           </Text>

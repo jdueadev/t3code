@@ -1461,6 +1461,12 @@ export function PullRequestDetailPanel({
                   stale={!nativeStackQuery.isFresh}
                   canMerge={supportsStackActions && can("merge") && allowedMergeMethods.length > 0}
                   canRebase={supportsStackActions && detail.viewerPermissions.stackRebase === true}
+                  canUnstack={
+                    environmentConfigs.get(environmentId)?.environment.capabilities
+                      .pullRequestStackEdits === true &&
+                    detail.capabilities.stackEdits === true &&
+                    detail.viewerPermissions.stackEdit === true
+                  }
                   onActed={() => {
                     refreshDetail();
                     onActed?.();

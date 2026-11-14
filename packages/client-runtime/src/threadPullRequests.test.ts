@@ -7,6 +7,7 @@ import { beforeEach, describe, expect, it } from "vite-plus/test";
 
 import {
   legacyThreadPullRequestKey,
+  pullRequestListLines,
   threadPullRequestSearchTerms,
   resolveThreadCurrentPullRequest,
   resolveThreadPullRequestChains,
@@ -328,6 +329,46 @@ describe("resolveThreadPullRequestChains", () => {
       ["native", [5, 6]],
       ["derived", [8]],
     ]);
+  });
+});
+
+it("offers the stack edit each chain allows on its bottom line", () => {
+  const stack = {
+    kind: "native" as const,
+    id: "s1",
+    number: 50,
+    url: "https://github.com/pingdotgg/t3code/stacks/50",
+    base: "main",
+    layers: [
+      { number: 5, headBranch: "a", state: "open" as const },
+      { number: 6, headBranch: "b", state: "open" as const },
+    ],
+  };
+  const lines = pullRequestListLines(
+    resolveThreadPullRequestChains([
+      // The bottom member's saved stack predates layer 6.
+      link(5, {
+        snapshot: snapshot({ headBranch: "a" }),
+        stack: { ...stack, layers: stack.layers.slice(0, 1) },
+      }),
+      link(6, { snapshot: snapshot({ headBranch: "b", baseBranch: "a" }), stack }),
+      link(7, { snapshot: snapshot({ headBranch: "c", baseBranch: "b" }) }),
+      link(8, { snapshot: snapshot({ headBranch: "d", baseBranch: "c" }) }),
+      link(20, { snapshot: snapshot({ headBranch: "x" }) }),
+      link(21, { snapshot: snapshot({ headBranch: "y", baseBranch: "x" }) }),
+      link(30, { snapshot: snapshot({ headBranch: "solo" }) }),
+      link(40, { snapshot: snapshot({ headBranch: "m" }) }),
+      link(41, { snapshot: snapshot({ state: "merged", headBranch: "n", baseBranch: "m" }) }),
+    ]),
+  );
+  expect(
+    Object.fromEntries(
+      lines.flatMap((line) => (line.stackEdit ? [[line.link.number, line.stackEdit]] : [])),
+    ),
+  ).toEqual({
+    5: { kind: "unstack", stackNumber: 50 },
+    7: { kind: "link", stackNumber: 50, numbers: [6, 7, 8] },
+    20: { kind: "link", numbers: [20, 21] },
   });
 });
 

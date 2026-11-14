@@ -309,6 +309,8 @@ export const PullRequestCapabilities = Schema.Struct({
   edit: Schema.optional(PullRequestEditCapabilities),
   stacks: Schema.optional(Schema.Boolean),
   stackActions: Schema.optional(Schema.Boolean),
+  /** The host can create a stack, add to one, and dissolve one. */
+  stackEdits: Schema.optional(Schema.Boolean),
   labels: Schema.optional(Schema.Boolean),
   /** The host searches the repository's users, so composers can complete `@login`. */
   mentions: Schema.optional(Schema.Boolean),
@@ -325,6 +327,7 @@ export type PullRequestCapabilities = typeof PullRequestCapabilities.Type;
 /** Unreported host permissions are granted. */
 export const PullRequestViewerPermissions = Schema.Struct({
   stackRebase: Schema.optional(Schema.Boolean),
+  stackEdit: Schema.optional(Schema.Boolean),
   actions: ForwardCompatibleArray(PullRequestAction),
   comment: Schema.Boolean,
   resolve: Schema.Boolean,
@@ -833,6 +836,32 @@ export const PullRequestActionInput = Schema.Struct({
   replyWithSummary: Schema.optional(Schema.Literal(true)),
 });
 export type PullRequestActionInput = typeof PullRequestActionInput.Type;
+
+/** Only send to environments advertising pullRequestStackEdits. */
+export const PullRequestStackEditInput = Schema.Struct({
+  /** `number` is any pull request the edit names: a layer of the stack, or one being stacked. */
+  ...PullRequestRef.fields,
+  edit: Schema.Union([
+    Schema.Struct({
+      kind: Schema.Literal("link"),
+      /**
+       * Bottom to top. With none stacked yet they become a new stack; when they start with a
+       * stack's layers, the rest are added on top of it.
+       */
+      numbers: Schema.Array(PositiveInt).check(Schema.isMinLength(2), Schema.isMaxLength(100)),
+    }),
+    Schema.Struct({ kind: Schema.Literal("unstack"), stackNumber: PositiveInt }),
+  ]),
+});
+export type PullRequestStackEditInput = typeof PullRequestStackEditInput.Type;
+
+export const PullRequestStackEditResult = Schema.Struct({
+  /** The stack as the edit left it; null once dissolved. */
+  stack: Schema.NullOr(PullRequestStack),
+  /** Every pull request whose stack the edit may have changed, including the ones it dissolved. */
+  affected: Schema.Array(PositiveInt),
+});
+export type PullRequestStackEditResult = typeof PullRequestStackEditResult.Type;
 
 // Preserve whitespace because it affects Markdown formatting.
 const CommentBody = Schema.String.check(Schema.isNonEmpty()).check(Schema.isMaxLength(65_536));

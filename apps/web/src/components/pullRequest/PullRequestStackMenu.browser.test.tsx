@@ -60,6 +60,7 @@ it.each([
         canMerge
         stale={false}
         canRebase
+        canUnstack={false}
         mergeMethod="squash"
         onActed={() => {}}
       />

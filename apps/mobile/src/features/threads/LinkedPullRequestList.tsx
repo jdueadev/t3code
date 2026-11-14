@@ -18,6 +18,7 @@ import * as Dialog from "../../components/ui/Dialog";
 import { Menu } from "../../components/ui/Menu";
 import { cn } from "../../lib/cn";
 import { RelativeTime } from "../../components/RelativeTime";
+import { useEnvironmentQuery } from "../../state/query";
 import type { EnvironmentRuntimeState } from "../../state/remote-runtime-types";
 import { useScaledTextRole } from "../settings/appearance/useScaledTextRole";
 import { PullRequestGlyph } from "../pull-requests/pullRequestGlyphs";
@@ -44,7 +45,7 @@ export function useLinkedPullRequestLines(
     const chains = resolveThreadPullRequestChains(supported ? (pullRequests ?? []) : []);
     const open = chains.filter((chain) => chain.layers.some(isOpenLink));
     const done = chains.filter((chain) => !chain.layers.some(isOpenLink));
-    return [...pullRequestListLines(open), ...pullRequestListLines(done)];
+    return [...pullRequestListLines(open, chains), ...pullRequestListLines(done, chains)];
   }, [pullRequests, supported]);
 }
 
@@ -167,13 +168,18 @@ export const LinkedPullRequestRow = memo(function LinkedPullRequestRow(props: {
     </Pressable>
   );
   const actions = props.actions;
+  // Only a chain's bottom row can carry a stack edit, so few rows read their write access.
+  const stackEditDetail = useEnvironmentQuery(actions?.stackEditTarget(props.line) ?? null).data;
   if (actions === null) return row;
   return (
     <Menu
       shouldOpenOnLongPress
       title={`#${link.number} · ${link.repository}`}
-      actions={actions.menuActions(link)}
-      onPressAction={({ nativeEvent }) => actions.onMenuAction(link, nativeEvent.event)}
+      actions={actions.menuActions(
+        props.line,
+        stackEditDetail?.viewerPermissions.stackEdit === true,
+      )}
+      onPressAction={({ nativeEvent }) => actions.onMenuAction(props.line, nativeEvent.event)}
     >
       {row}
     </Menu>

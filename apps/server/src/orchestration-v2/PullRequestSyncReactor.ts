@@ -70,6 +70,19 @@ const CREATE_COMMANDS = sourceControlDefinitions.definitions.flatMap(
           },
         ],
 );
+const STACK_CREATE_COMMANDS = sourceControlDefinitions.definitions.flatMap(
+  ({ kind, changeRequestStackCreateCommand: stack }) =>
+    stack === undefined
+      ? []
+      : [
+          {
+            kind,
+            command: stack.command,
+            created: stack.created,
+            run: new RegExp(`${COMMAND_START}${stack.command.source}(?=$|[\\s;&|)])`, "u"),
+          },
+        ],
+);
 const createCommandCount = (code: string) =>
   CREATE_COMMANDS.reduce((count, { run }) => count + [...code.matchAll(run)].length, 0);
 // A push, directly or through a stack tool, that can start checks on a linked pull request.
@@ -150,16 +163,28 @@ type CommandExecution = Extract<OrchestrationV2TurnItem, { readonly type: "comma
  * some, such as `gh pr list`, so none are taken.
  */
 export function changeRequestsCreatedBy(input: string, output: string) {
-  if (!CREATE_COMMANDS.some(({ command }) => command.test(input))) return [];
+  const stacked = STACK_CREATE_COMMANDS.some(({ command }) => command.test(input));
+  if (!stacked && !CREATE_COMMANDS.some(({ command }) => command.test(input))) return [];
   const script = shellScript(input);
   const code = shellCode(script);
+  const submitted = new Map<string, ThreadPullRequestKey & { readonly url: string }>();
+  // A stack CLI names each change request it opened, so its lines need no counting.
+  for (const { kind, run, created } of stacked ? STACK_CREATE_COMMANDS : []) {
+    if (!run.test(code)) continue;
+    for (const [, url = ""] of output.matchAll(created)) {
+      const parsed = sourceControlDefinitions.parseChangeRequestUrl(url);
+      if (parsed === null || parsed.definition.kind !== kind) continue;
+      const key = normalizeThreadPullRequestKey(parsed.link);
+      submitted.set(threadPullRequestKeyOf(key), { ...key, url });
+    }
+  }
   const creates = createCommandCount(code);
-  if (creates === 0) return [];
+  if (creates === 0) return [...submitted.values()];
   const otherCommands = code
     .split(COMMAND_SEPARATOR)
     .filter((part) => createCommandCount(part) === 0)
     .join("\n");
-  if (LISTS_CHANGE_REQUESTS.test(otherCommands)) return [];
+  if (LISTS_CHANGE_REQUESTS.test(otherCommands)) return [...submitted.values()];
   const otherScript = shellSegments(script)
     .filter((segment) => createCommandCount(shellCode(segment)) === 0)
     .join("\n");
@@ -178,7 +203,7 @@ export function changeRequestsCreatedBy(input: string, output: string) {
     const key = normalizeThreadPullRequestKey(link);
     created.set(threadPullRequestKeyOf(key), { ...key, url });
   }
-  return created.size > creates ? [] : [...created.values()];
+  return [...new Map([...submitted, ...(created.size > creates ? [] : created)]).values()];
 }
 
 const isPullRequestProviderError = Schema.is(PullRequestProviderError);
@@ -573,22 +598,35 @@ export const make = Effect.gen(function* () {
         const fetched = fetchedStack.stack;
         stacksReadThisSweep.set(key, fetched);
         // New upper layers leave older members' fields unchanged; differing layer lists need a stack read.
-        // Only flag siblings in the same project: different credentials can yield lists that never agree.
-        if (fetched !== null) {
-          const fetchedKey = nativeStackKeyOf(first.link, fetched);
+        // A member that left its stack, or whose stack dissolved, leaves the old layers to re-read too,
+        // in every project. Only compare layer lists within a project: different credentials can
+        // yield lists that never agree.
+        const fetchedKey = fetched === null ? null : nativeStackKeyOf(first.link, fetched);
+        const leftKeys = new Set(
+          entries.flatMap(({ link }) =>
+            link.stack === null || nativeStackKeyOf(link, link.stack) === fetchedKey
+              ? []
+              : [nativeStackKeyOf(link, link.stack)],
+          ),
+        );
+        if (fetched !== null || leftKeys.size > 0) {
           for (const [siblingKey, siblingEntries] of groups) {
             if (siblingKey === key) continue;
-            if (siblingEntries[0]!.thread.projectId !== first.thread.projectId) continue;
+            const sameProject = siblingEntries[0]!.thread.projectId === first.thread.projectId;
             const readThisSweep = stacksReadThisSweep.get(siblingKey);
-            const stale = siblingEntries.some(({ link }) => {
+            let stale = false;
+            let left = false;
+            for (const { link } of siblingEntries) {
               const stack = readThisSweep === undefined ? link.stack : readThisSweep;
-              return (
-                stack !== null &&
-                nativeStackKeyOf(link, stack) === fetchedKey &&
-                !sameLayerNumbers(stack, fetched)
-              );
-            });
-            if (stale) retryStacks.add(siblingKey);
+              if (stack === null) continue;
+              const stackKey = nativeStackKeyOf(link, stack);
+              if (fetched !== null && stackKey === fetchedKey)
+                stale ||= sameProject && !sameLayerNumbers(stack, fetched);
+              else left ||= leftKeys.has(stackKey);
+            }
+            if (stale || left) retryStacks.add(siblingKey);
+            // Settled threads skip stack retries; a request reaches them too.
+            if (left) requested.add(siblingKey);
           }
         }
       }

@@ -71,6 +71,8 @@ import {
   type PullRequestThreadResolutionInput,
   type PullRequestThreadCommentsInput,
   type PullRequestThreadCommentsResult,
+  type PullRequestStackEditInput,
+  type PullRequestStackEditResult,
   type PullRequestUpdateInput,
   type SourceControlProviderInfo,
   SourceControlProviderKind,
@@ -93,6 +95,7 @@ import {
   type ProviderFilterOptionPage,
   type ProviderListCursor,
   type ProviderChangeRequestSummary,
+  type ProviderChangeRequestStack,
   type ProviderChangeRequestWatchFingerprint,
   type PullRequestProviderApi,
   PullRequestProviderError,
@@ -271,6 +274,9 @@ export class PullRequestService extends Context.Service<
     readonly runAction: (
       input: PullRequestActionInput,
     ) => Effect.Effect<PullRequestSummary | undefined, PullRequestError>;
+    readonly editStack: (
+      input: PullRequestStackEditInput,
+    ) => Effect.Effect<PullRequestStackEditResult, PullRequestError>;
     readonly update: (input: PullRequestUpdateInput) => Effect.Effect<void, PullRequestError>;
     readonly comment: (input: PullRequestCommentInput) => Effect.Effect<void, PullRequestError>;
     readonly updateComment: (
@@ -622,6 +628,11 @@ function withRateLimitBackoff(
       ? {}
       : { getFileRevisions: wrap("getFileRevisions", api.getFileRevisions) }),
     runAction: interactive("runAction", api.runAction),
+    ...(api.editChangeRequestStack === undefined
+      ? {}
+      : {
+          editChangeRequestStack: interactive("editChangeRequestStack", api.editChangeRequestStack),
+        }),
     ...(api.updateChangeRequest === undefined
       ? {}
       : {
@@ -1815,6 +1826,22 @@ export const make = Effect.gen(function* () {
       }),
     );
 
+  const toStack = (stack: ProviderChangeRequestStack | null): PullRequestStack | null =>
+    stack === null
+      ? null
+      : {
+          id: stack.id,
+          number: stack.number,
+          url: stack.url,
+          base: stack.base,
+          layers: stack.layers.map((layer) => ({
+            ...layer,
+            number: layer.number,
+            headBranch: layer.headBranch,
+            state: layer.state,
+          })),
+        };
+
   const stackUncached: PullRequestService["Service"]["stack"] = (input, options) =>
     requireProject(input).pipe(
       Effect.flatMap((project) => {
@@ -1826,27 +1853,72 @@ export const make = Effect.gen(function* () {
           host: project.host,
           number: input.number,
           includeDetails: options?.includeDetails !== false,
-        }).pipe(
-          Effect.mapError(toPullRequestError("stack")),
-          Effect.map((stack): PullRequestStack | null =>
-            stack === null
-              ? null
-              : {
-                  id: stack.id,
-                  number: stack.number,
-                  url: stack.url,
-                  base: stack.base,
-                  layers: stack.layers.map((layer) => ({
-                    ...layer,
-                    number: layer.number,
-                    headBranch: layer.headBranch,
-                    state: layer.state,
-                  })),
-                },
-          ),
-        );
+        }).pipe(Effect.mapError(toPullRequestError("stack")), Effect.map(toStack));
       }),
     );
+
+  const editStack: PullRequestService["Service"]["editStack"] = Effect.fn(
+    "PullRequestService.editStack",
+  )(function* (input) {
+    const project = yield* requireProject(input);
+    const edit = project.api.editChangeRequestStack;
+    if (project.api.capabilities.stackEdits !== true || edit === undefined) {
+      return yield* new PullRequestOperationError({
+        operation: "editStack",
+        detail: "This host cannot change a stack.",
+      });
+    }
+    const viewer = yield* viewerPermissionsOf(project, input, "editStack");
+    if (viewer.stackEdit !== true) {
+      return yield* new PullRequestOperationError({
+        operation: "editStack",
+        detail: "You need write access to this repository to change its stacks.",
+      });
+    }
+    // A dissolved stack answers with nothing, so its layers are read before it goes. The read
+    // also stops an unstack aimed at a stack this pull request has since left.
+    const before =
+      input.edit.kind === "unstack" ? yield* stackUncached(input, { includeDetails: false }) : null;
+    if (input.edit.kind === "unstack" && before?.number !== input.edit.stackNumber) {
+      return yield* new PullRequestOperationError({
+        operation: "editStack",
+        detail: `#${input.number} is no longer in stack #${input.edit.stackNumber}. Refresh and try again.`,
+      });
+    }
+    const resync = (numbers: Iterable<number>) =>
+      Effect.forEach(
+        new Set(numbers),
+        (number) =>
+          PubSub.publish(stateChanges, {
+            host: project.host,
+            repository: project.repository,
+            number,
+          }),
+        { discard: true },
+      );
+    const known = [
+      ...(input.edit.kind === "link" ? input.edit.numbers : [input.number]),
+      ...(before?.layers ?? []).map((layer) => layer.number),
+    ];
+    // The host may apply an edit whose answer is then lost, so the known layers are read again
+    // whether or not the edit reports success.
+    const stack = yield* edit({
+      cwd: project.project.workspaceRoot,
+      repository: project.repository,
+      host: project.host,
+      edit: input.edit,
+    }).pipe(
+      Effect.mapError(toPullRequestError("editStack")),
+      Effect.ensuring(refreshAfterTurn(project.project.id).pipe(Effect.andThen(resync(known)))),
+    );
+    const added = (stack?.layers ?? [])
+      .map((layer) => layer.number)
+      .filter((n) => !known.includes(n));
+    yield* resync(added);
+    // Returned so a client that routed the edit here can resync the same layers on the thread's
+    // own environment, which never sees this server's notifications.
+    return { stack: toStack(stack), affected: [...new Set([...known, ...added])] };
+  });
 
   const detailUncached: PullRequestService["Service"]["detail"] = (input) =>
     requireProject(input).pipe(
@@ -3917,6 +3989,7 @@ export const make = Effect.gen(function* () {
       Cache.get(changeBreakdownCache, refCacheKey(input)),
     ),
     runAction: runActionAndInvalidate,
+    editStack,
     update: invalidatedByMutation(update),
     comment: invalidatedByMutation(comment),
     updateComment: invalidatedByMutation(updateComment),

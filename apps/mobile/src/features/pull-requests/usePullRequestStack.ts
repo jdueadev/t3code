@@ -43,6 +43,11 @@ export function usePullRequestStack(params: PullRequestParams, pr: PullRequestDe
     stack,
     isFresh: supported && query.isSuccess && !query.isPending,
     supportsStackActions: supported && pr?.capabilities.stackActions === true,
+    supportsStackEdits:
+      supported &&
+      config?.environment.capabilities.pullRequestStackEdits === true &&
+      pr?.capabilities.stackEdits === true &&
+      pr.viewerPermissions.stackEdit === true,
   };
 }
 

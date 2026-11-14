@@ -12,7 +12,7 @@ import * as GitHubCredentials from "./GitHubCredentials.ts";
 import * as GitHubQuota from "./GitHubQuota.ts";
 import * as GitHubRequestPolicy from "./GitHubRequestPolicy.ts";
 import * as TestSourceControlHost from "@t3tools/source-control-testing/TestSourceControlHost";
-import { runGitHubStackAction as runStackAction } from "./githubStackActions.ts";
+import { editGitHubStack, runGitHubStackAction as runStackAction } from "./githubStackActions.ts";
 import * as GitHubAppAccess from "./GitHubAppAccess.ts";
 import * as GitHubAppSignIn from "./GitHubAppSignIn.ts";
 
@@ -360,5 +360,89 @@ it.effect("rebases the open layers bottom to top in a scratch clone, each onto t
         "new-sha:refs/heads/top",
       ],
     ]);
+  }),
+);
+
+const editStack = (
+  replies: ReadonlyArray<unknown>,
+  edit: Parameters<typeof editGitHubStack>[0]["edit"],
+) => {
+  const calls: Call[] = [];
+  return editGitHubStack({ repository: "acme/web", host: "github.com", edit }).pipe(
+    Effect.provide(
+      Layer.mock(GitHubRest.GitHubRest)({
+        rest: (request) =>
+          Effect.sync(() => {
+            calls.push(words(`${request.method ?? "GET"} ${request.path}`, request.body));
+            const reply = replies[calls.length - 1];
+            if (reply === undefined) throw new Error("Unexpected GitHub request");
+            return {
+              status: reply === "" ? 204 : 200,
+              headers: {},
+              body: reply === "" ? "" : encodeJson(reply),
+              truncated: false,
+              invalidUtf8: false,
+            };
+          }),
+      }),
+    ),
+    Effect.result,
+    Effect.map((result) => ({ result, calls })),
+  );
+};
+
+it.effect.each([
+  {
+    name: "creates a stack when the bottom pull request is in none",
+    replies: [[], stack[0]],
+    edit: { kind: "link", numbers: [7, 8, 9] },
+    calls: [
+      ["GET repos/acme/web/stacks?pull_request=7"],
+      ["POST repos/acme/web/stacks", "pull_requests=[7,8,9]"],
+    ],
+    layers: [1, 2, 3],
+  },
+  {
+    name: "adds only the pull requests above the existing top",
+    replies: [stack, stack[0]],
+    edit: { kind: "link", numbers: [2, 3, 4, 5] },
+    calls: [
+      ["GET repos/acme/web/stacks?pull_request=2"],
+      ["POST repos/acme/web/stacks/50/add", "pull_requests=[4,5]"],
+    ],
+    layers: [1, 2, 3],
+  },
+  {
+    name: "leaves a stack that already holds them alone",
+    replies: [stack],
+    edit: { kind: "link", numbers: [2, 3] },
+    calls: [["GET repos/acme/web/stacks?pull_request=2"]],
+    layers: [1, 2, 3],
+  },
+  {
+    name: "reports a dissolved stack as none",
+    replies: [""],
+    edit: { kind: "unstack", stackNumber: 50 },
+    calls: [["POST repos/acme/web/stacks/50/unstack"]],
+    layers: null,
+  },
+] as const)("edits a stack: $name", ({ replies, edit, calls, layers }) =>
+  Effect.gen(function* () {
+    const outcome = yield* editStack(replies, edit);
+    expect(outcome.calls).toEqual(calls);
+    expect(outcome.result).toMatchObject({ _tag: "Success" });
+    if (outcome.result._tag !== "Success") return;
+    expect(outcome.result.success?.layers.map((layer) => layer.number) ?? null).toEqual(layers);
+  }),
+);
+
+it.effect("refuses to link pull requests that would not sit on the stack's top", () =>
+  Effect.gen(function* () {
+    const outcome = yield* editStack([stack], { kind: "link", numbers: [2, 4] });
+    expect(outcome.result).toMatchObject({
+      _tag: "Failure",
+      failure: { _tag: "GitHubStackLinkRefusedError", stackNumber: 50 },
+    });
+    expect(outcome.calls).toHaveLength(1);
   }),
 );
