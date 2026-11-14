@@ -71,7 +71,7 @@ const TelemetryEnvConfig = Config.all({
   posthogHost: Config.String("T3CODE_POSTHOG_HOST").pipe(
     Config.withDefault("https://ingest.t3.codes"),
   ),
-  enabled: Config.Boolean("T3CODE_TELEMETRY_ENABLED").pipe(Config.withDefault(true)),
+  enabled: Config.Boolean("T3CODE_TELEMETRY_ENABLED").pipe(Config.withDefault(false)),
   flushBatchSize: Config.Number("T3CODE_TELEMETRY_FLUSH_BATCH_SIZE").pipe(Config.withDefault(20)),
   maxBufferedEvents: Config.Number("T3CODE_TELEMETRY_MAX_BUFFERED_EVENTS").pipe(
     Config.withDefault(1_000),
@@ -133,7 +133,7 @@ export const make = Effect.gen(function* () {
       return Effect.succeed(false);
     const preference = hostEnvironment.T3CODE_TELEMETRY_ENABLED;
     return Config.Boolean("T3CODE_TELEMETRY_ENABLED").pipe(
-      Config.withDefault(true),
+      Config.withDefault(false),
       Effect.provideService(
         ConfigProvider.ConfigProvider,
         ConfigProvider.fromEnv({
