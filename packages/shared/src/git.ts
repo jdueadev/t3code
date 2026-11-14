@@ -363,6 +363,32 @@ function toLocalStatusPart(status: VcsStatusResult): VcsStatusLocalResult {
   };
 }
 
+/**
+ * Whether a settled thread left uncommitted work in its own worktree, on its own branch.
+ * A thread on the project checkout, a default branch, or a branch it did not run on gets no offer.
+ */
+export function hasUncommittedThreadWork(input: {
+  readonly worktreePath: string | null;
+  readonly threadBranch: string | null;
+  readonly runActive: boolean;
+  readonly status: Pick<
+    VcsStatusLocalResult,
+    "isRepo" | "isDefaultRef" | "refName" | "hasWorkingTreeChanges"
+  > | null;
+}): boolean {
+  const { status } = input;
+  return (
+    input.worktreePath !== null &&
+    !input.runActive &&
+    status !== null &&
+    status.isRepo &&
+    status.hasWorkingTreeChanges &&
+    !status.isDefaultRef &&
+    status.refName !== null &&
+    status.refName === input.threadBranch
+  );
+}
+
 export function applyGitStatusStreamEvent(
   current: VcsStatusResult | null,
   event: VcsStatusStreamEvent,

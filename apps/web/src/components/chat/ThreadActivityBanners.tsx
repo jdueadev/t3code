@@ -270,6 +270,51 @@ export function backgroundWorkNowItem(input: {
   };
 }
 
+/** The last run left uncommitted changes in the thread's worktree. */
+export function threadWorktreeCommitBannerItem(input: {
+  readonly offerKey: string;
+  readonly branch: string;
+  readonly disabled: boolean;
+  readonly pendingAction: "commit" | "commit_push_pr" | null;
+  readonly onCommit: () => void;
+  readonly onCommitAndOpenPr: () => void;
+  readonly onDismiss: () => void;
+}): ComposerBannerStackItem {
+  return {
+    id: `thread-worktree-commit:${input.offerKey}`,
+    variant: "info",
+    icon: <GitBranchIcon />,
+    title: (
+      <span className="flex min-w-0 items-baseline gap-1.5">
+        <span className="shrink-0 font-normal text-muted-foreground">Uncommitted changes on</span>
+        <code className="min-w-0 truncate font-medium text-foreground">{input.branch}</code>
+      </span>
+    ),
+    actions: (
+      <>
+        <Button
+          size="xs"
+          variant="ghost"
+          disabled={input.disabled || input.pendingAction !== null}
+          onClick={input.onCommit}
+        >
+          {input.pendingAction === "commit" ? "Committing..." : "Commit on thread branch"}
+        </Button>
+        <Button
+          size="xs"
+          variant="ghost"
+          disabled={input.disabled || input.pendingAction !== null}
+          onClick={input.onCommitAndOpenPr}
+        >
+          {input.pendingAction === "commit_push_pr" ? "Opening PR..." : "Commit and open PR"}
+        </Button>
+      </>
+    ),
+    dismissLabel: "Dismiss uncommitted changes notice",
+    onDismiss: input.onDismiss,
+  };
+}
+
 /** The local checkout moved off the branch this thread last ran on. */
 export function branchMismatchBannerItem(input: {
   readonly mismatchKey: string;

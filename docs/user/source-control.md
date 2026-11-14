@@ -185,6 +185,11 @@ An existing fork PR can appear beside the branch even if you pushed without sett
 If its badge is missing because several remotes hold that branch, set the branch's upstream to
 the intended remote with `git branch --set-upstream-to=<remote>/<branch>`.
 
+When a run leaves uncommitted changes in a thread's worktree, the thread offers **Commit on thread
+branch** and **Commit and open PR**. Nothing is committed until you choose one, unless you turn on
+**Settings → Worktrees → Commit thread worktrees automatically**. Commits use your Git identity; set
+`user.name` and `user.email` first if Git has none.
+
 Choose how commit messages and pull request titles and descriptions are written in
 **Settings → Source control → Commits & pull requests**. **Repository conventions** uses the
 project's instructions and recent commit subjects. **Custom instructions** applies your own

@@ -83,6 +83,7 @@ import * as ProjectSetupScriptRunner from "../project/ProjectSetupScriptRunner.t
 import * as ProviderRegistry from "../provider/ProviderRegistry.ts";
 import { extractBranchNameFromRemoteRef } from "./remoteRefs.ts";
 import { detachStackFrame } from "./detachStackFrame.ts";
+import { PullRequestPreflight, stackedActionRefusal } from "./stackedActionPreflight.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import type { GitManagerServiceError } from "@t3tools/contracts";
 import * as GitVcsDriver from "../vcs/GitVcsDriver.ts";
@@ -696,6 +697,7 @@ function toPullRequestHeadRemoteInfo(pr: {
 
 export const make = Effect.gen(function* () {
   const gitCore = yield* GitVcsDriver.GitVcsDriver;
+  const pullRequestPreflight = yield* PullRequestPreflight;
   const sourceControlProviders = yield* SourceControlProviderRegistry.SourceControlProviderRegistry;
   const textGeneration = yield* TextGeneration.TextGeneration;
   const providerRegistry = yield* ProviderRegistry.ProviderRegistry;
@@ -3442,6 +3444,23 @@ export const make = Effect.gen(function* () {
             cwd: input.cwd,
             detail: "Cannot create a pull request from detached HEAD.",
           });
+        }
+        const refusal = stackedActionRefusal({
+          wantsCommit,
+          wantsPush,
+          userName: wantsCommit ? yield* gitCore.readConfigValue(input.cwd, "user.name") : null,
+          userEmail: wantsCommit ? yield* gitCore.readConfigValue(input.cwd, "user.email") : null,
+          hasRemote: initialStatus.hasOriginRemote,
+        });
+        if (refusal !== null) {
+          return yield* new GitManagerError({
+            operation: "runStackedAction",
+            cwd: input.cwd,
+            detail: refusal,
+          });
+        }
+        if (wantsPr) {
+          yield* pullRequestPreflight.ensureForkFreshBeforePullRequest({ cwd: input.cwd });
         }
 
         let branchStep: { status: "created" | "skipped_not_requested"; name?: string };
