@@ -1,7 +1,11 @@
 import {
+  type ModelSelection,
   type OrchestrationV2LimitRecovery,
   type OrchestrationV2LimitRecoveryUpdate,
+  type ProjectId,
   type RunId,
+  type ServerProvider,
+  type ServerSettings,
 } from "@t3tools/contracts";
 import { type TimestampFormat } from "@t3tools/contracts/settings";
 import { deadlineStore } from "@t3tools/client-runtime/clock";
@@ -9,6 +13,7 @@ import { limitRecoveryOwnsSnooze } from "@t3tools/client-runtime/state/thread-ex
 import {
   CHATGPT_USAGE_LIMIT_CODE,
   CHATGPT_WORKSPACE_USAGE_LIMIT_CODE,
+  usageLimitFallbackOptions,
 } from "@t3tools/shared/usageLimits";
 import { GaugeIcon } from "lucide-react";
 import { useState } from "react";
@@ -32,7 +37,40 @@ type RecoveryProps = {
   recovery: OrchestrationV2LimitRecovery | null;
   timestampFormat: TimestampFormat;
   onChange: (recovery: OrchestrationV2LimitRecoveryUpdate) => Promise<void>;
+  /** Fallbacks with quota, offered when the "On usage limit" setting is Ask. */
+  continueOptions: ReadonlyArray<{ readonly selection: ModelSelection; readonly label: string }>;
+  onContinueWith: (selection: ModelSelection) => void;
 };
+
+/** The user's fallbacks for the limited model that can run now; none unless the setting is Ask. */
+export function usageLimitContinueOptions(input: {
+  readonly from: ModelSelection | undefined;
+  readonly settings: ServerSettings;
+  readonly providers: ReadonlyArray<ServerProvider>;
+  readonly hubOrigins: ReadonlyArray<string>;
+  readonly projectId: ProjectId | null;
+}): RecoveryProps["continueOptions"] {
+  if (input.from === undefined || input.settings.usageLimitRouting.onLimit !== "ask") return [];
+  return usageLimitFallbackOptions({
+    from: input.from,
+    routing: input.settings.usageLimitRouting,
+    providers: input.providers,
+    now: Date.now(),
+    hubOrigins: input.hubOrigins,
+    fallbackSelection: input.settings.fallbackModelSelection,
+    settings: input.settings,
+    projectId: input.projectId,
+  }).flatMap(({ selection, provider, rejection }) => {
+    if (rejection !== null) return [];
+    const model = provider?.models.find((entry) => entry.slug === selection.model)?.name;
+    return [
+      {
+        selection,
+        label: `${provider?.displayName ?? selection.instanceId} ${model ?? selection.model}`,
+      },
+    ];
+  });
+}
 
 export function usageLimitRecoveryBannerItem(props: RecoveryProps): ComposerBannerStackItem {
   const {
@@ -53,9 +91,27 @@ export function usageLimitRecoveryBannerItem(props: RecoveryProps): ComposerBann
     canSchedule && recovery?.runId === runId && recovery.resetAt === resetAt && recovery.autoResume;
   const workspaceLimit = errorCode === CHATGPT_WORKSPACE_USAGE_LIMIT_CODE;
   const chatGptLimit = workspaceLimit || errorCode === CHATGPT_USAGE_LIMIT_CODE;
-  const recoveryActions = canSchedule ? (
-    <RecoveryActions key={`${runId}:${resetAt}`} {...props} />
-  ) : null;
+  const continueActions =
+    settled || requestPending || props.continueOptions.length === 0 ? null : (
+      <span className="flex flex-wrap items-center gap-x-3 gap-y-1 px-1">
+        {props.continueOptions.map((option) => (
+          <InlineButton
+            key={`${option.selection.instanceId}:${option.selection.model}`}
+            touchTarget="padded"
+            onClick={() => props.onContinueWith(option.selection)}
+          >
+            Continue with {option.label}
+          </InlineButton>
+        ))}
+      </span>
+    );
+  const recoveryActions =
+    continueActions === null && !canSchedule ? null : (
+      <>
+        {continueActions}
+        {canSchedule ? <RecoveryActions key={`${runId}:${resetAt}`} {...props} /> : null}
+      </>
+    );
   const displayAt =
     resumes && resetAt && snoozedUntil && Date.parse(snoozedUntil) > Date.parse(resetAt)
       ? snoozedUntil

@@ -26,6 +26,7 @@ import {
   ScreenReaderAnnouncements,
   ToolCallVisibility,
   type UsageLimitAction,
+  type UsageLimitFallbackRule,
 } from "@t3tools/contracts/settings";
 import { desktopUpdateChannelOf } from "@t3tools/shared/cliRelease";
 import { createModelSelection, pickModelSelection } from "@t3tools/shared/model";
@@ -84,6 +85,8 @@ import { EMPTY_SERVER_PROVIDERS } from "../../state/server";
 import { Button } from "../ui/button";
 import { DraftInput } from "../ui/draft-input";
 import { Input } from "../ui/input";
+import { Textarea } from "../ui/textarea";
+import { formatUsageLimitFallbacks, parseUsageLimitFallbacks } from "./usageLimitFallbacks.logic";
 import { Select, SelectItem, SelectPopup, SelectTrigger, SelectValue } from "../ui/select";
 import { Switch } from "../ui/switch";
 import { ScopedSwitch } from "./ScopedSwitch";
@@ -736,6 +739,35 @@ export function useSettingsRestore(onRestored?: () => void) {
     changedSettingLabels,
     restoreDefaults,
   };
+}
+
+function UsageLimitFallbacksInput({
+  saved,
+  onCommit,
+}: {
+  saved: ReadonlyArray<UsageLimitFallbackRule>;
+  onCommit: (rules: ReadonlyArray<UsageLimitFallbackRule>) => void;
+}) {
+  const [error, setError] = useState<string | null>(null);
+  const savedText = formatUsageLimitFallbacks(saved);
+  return (
+    <div className="mt-2 space-y-1">
+      <Textarea
+        key={savedText}
+        aria-label="Usage limit fallbacks"
+        rows={3}
+        defaultValue={savedText}
+        placeholder="claudeAgent:claude-opus* -> codex:gpt-5, ollama:qwen3:32b"
+        onBlur={(event) => {
+          const parsed = parseUsageLimitFallbacks(event.target.value, saved);
+          setError("error" in parsed ? parsed.error : null);
+          if ("rules" in parsed && formatUsageLimitFallbacks(parsed.rules) !== savedText)
+            onCommit(parsed.rules);
+        }}
+      />
+      {error === null ? null : <p className="text-xs text-destructive">{error}</p>}
+    </div>
+  );
 }
 
 const AUTO_SETTLE_DEFAULT_DAYS = DEFAULT_UNIFIED_SETTINGS.sidebarAutoSettleAfterDays ?? 7;
@@ -1913,6 +1945,17 @@ export function ThreadsSettingsPanel() {
             </Select>
           }
         />
+        <SettingsRow
+          serverScoped
+          {...searchableSetting("usage-limit-fallbacks")}
+          description="One rule per line: <instance>, <instance>:<model> or <instance>:<prefix>*, then -> and the <instance>:<model> fallbacks to try in order. Without a rule, the new-thread fallback model is used."
+          settingKeys={["usageLimitRouting"]}
+        >
+          <UsageLimitFallbacksInput
+            saved={settings.usageLimitRouting.fallbacks}
+            onCommit={(fallbacks) => updateSettings({ usageLimitRouting: { fallbacks } })}
+          />
+        </SettingsRow>
       </SettingsSection>
 
       {hasServerTargets ? (

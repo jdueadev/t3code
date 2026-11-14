@@ -466,6 +466,12 @@ export const SETTINGS_SEARCH_ITEMS = [
     searchTerms: ["usage quota limit fallback model switch route provider wait ask cooldown"],
   },
   {
+    id: "usage-limit-fallbacks",
+    title: "Usage limit fallbacks",
+    to: "/settings/threads",
+    searchTerms: ["usage quota limit fallback models order list route switch"],
+  },
+  {
     id: "working-shelf",
     title: msg("Working section"),
     to: "/settings/general",
