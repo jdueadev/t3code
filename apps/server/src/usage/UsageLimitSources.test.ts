@@ -2,6 +2,8 @@ import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
 import { expect, it } from "@effect/vitest";
 import {
   ProviderDriverKind,
+  ProviderInstanceId,
+  type ServerProvider,
   SecretProviderId,
   ServerConfigStreamEvent,
   UsageLimitSourceId,
@@ -305,3 +307,176 @@ it.effect("the reset fallback refreshes its hub, and a stalled hub cannot hold t
     expect(yield* Fiber.join(stalled)).toBeNull();
   }),
 );
+
+const claudeProvider = (overrides: Partial<ServerProvider> = {}): ServerProvider => ({
+  instanceId: ProviderInstanceId.make("claude"),
+  driver: ProviderDriverKind.make("claudeAgent"),
+  enabled: true,
+  installed: true,
+  version: null,
+  status: "ready",
+  auth: { status: "authenticated", endpoint: "http://hub.test" },
+  checkedAt: at(0),
+  models: [],
+  slashCommands: [],
+  skills: [],
+  ...overrides,
+});
+
+it.each([
+  {
+    name: "the provider's own spent window",
+    provider: claudeProvider({
+      usageLimits: { checkedAt: at(0), windows: [spent("five_hour", 3)] },
+    }),
+    sources: [],
+    expected: { resetAt: at(3), source: "claude" },
+  },
+  {
+    name: "a hub whose whole pool for the driver is spent",
+    provider: claudeProvider(),
+    sources: [{ ...hub([{ windows: [spent("five_hour", 2)] }]), origin: "http://hub.test" }],
+    expected: { resetAt: at(2), source: "hub" },
+  },
+  {
+    name: "nothing while the hub still has an account with room",
+    provider: claudeProvider(),
+    sources: [
+      {
+        ...hub([{ windows: [spent("five_hour", 2)] }, { windows: [] }]),
+        origin: "http://hub.test",
+      },
+    ],
+    expected: null,
+  },
+  {
+    name: "nothing from a hub at another endpoint",
+    provider: claudeProvider(),
+    sources: [{ ...hub([{ windows: [spent("five_hour", 2)] }]), origin: "http://other.test" }],
+    expected: null,
+  },
+  {
+    name: "nothing when the spent window's reset is unknown",
+    provider: claudeProvider({
+      usageLimits: {
+        checkedAt: at(0),
+        windows: [{ ...spent("five_hour", 3), resetsAt: undefined }],
+      },
+    }),
+    sources: [],
+    expected: null,
+  },
+  { name: "nothing for an unknown instance", provider: undefined, sources: [], expected: null },
+])("pre-empts a turn on $name", ({ provider, sources, expected }) => {
+  expect(
+    UsageLimitSources.preemptiveUsageLimit({
+      provider,
+      sources,
+      model: "claude-haiku-5-5",
+      now: NOW,
+    }),
+  ).toEqual(expected);
+});
+
+const quotaStatusFixture = {
+  schema_version: 1,
+  generated_at: "2026-11-13T12:00:00Z",
+  routing: "fill-first",
+  final_error: true,
+  thresholds: { preempt_at: 90, block_at: 100 },
+  models: [
+    {
+      model: "claude-haiku-5-5",
+      providers: ["claude"],
+      state: "exhausted",
+      earliest_reset_at: at(2),
+      would_pick: null,
+      accounts: { ok: 0, near_limit: 0, cooldown: 2, total: 2 },
+    },
+    {
+      model: "gpt-6.1-sol",
+      providers: ["codex"],
+      state: "near_limit",
+      earliest_reset_at: null,
+      would_pick: "acct-1",
+      accounts: { ok: 0, near_limit: 1, cooldown: 0, total: 1 },
+    },
+    { model: "qwen", providers: ["local"], state: "ok", earliest_reset_at: null },
+  ],
+  accounts: [{ label: "acct-1" }],
+};
+
+it("reads exhausted models from a quota router status, and nothing else", () => {
+  const exhausted = UsageLimitSources.parseQuotaRouterStatus(JSON.stringify(quotaStatusFixture));
+  expect([...(exhausted ?? new Map())]).toEqual([["claude-haiku-5-5", at(2)]]);
+  expect(
+    UsageLimitSources.parseQuotaRouterStatus(
+      JSON.stringify({ ...quotaStatusFixture, schema_version: 2 }),
+    ),
+  ).toBeNull();
+  expect(UsageLimitSources.parseQuotaRouterStatus("quota-tools: data dir missing")).toBeNull();
+  // A near limit model is the router's to move, so it holds no turn back.
+  expect(
+    UsageLimitSources.preemptiveUsageLimit({
+      provider: claudeProvider({
+        auth: { status: "authenticated", endpoint: "http://proxy.test" },
+      }),
+      sources: [],
+      model: "claude-haiku-5-5",
+      now: NOW,
+      routerExhausted: exhausted,
+    }),
+  ).toEqual({ resetAt: at(2), source: "the quota router" });
+  expect(
+    UsageLimitSources.preemptiveUsageLimit({
+      provider: claudeProvider(),
+      sources: [],
+      model: "gpt-6.1-sol",
+      now: NOW,
+      routerExhausted: exhausted,
+    }),
+  ).toBeNull();
+});
+
+const finalErrorFixture = {
+  type: "error",
+  error: {
+    type: "usage_limit_reached",
+    code: "quota_router_exhausted",
+    retryable: false,
+    model: "claude-haiku-5-5",
+    providers: ["claude"],
+    resets_at: Math.floor(Date.parse(at(3)) / 1000),
+    reset_at: "2026-11-13T15:00:00Z",
+    resets_in_seconds: 10_800,
+    reset_estimated: false,
+    retry_after_seconds: 10_800,
+    accounts: { total: 2, in_cooldown: 0, at_limit: 2 },
+    alternatives: [{ model: "gpt-6.1-sol", provider: "codex" }],
+    message: "Every account for claude-haiku-5-5 is at its limit.",
+    schema_version: 1,
+  },
+};
+
+it("turns the proxy's final error into a terminal usage limit with its reset", () => {
+  const failure = UsageLimitSources.classifyQuotaRouterFailure({
+    class: "provider_error",
+    message: `unexpected status 429 Too Many Requests: ${JSON.stringify(finalErrorFixture)} (request id abc)`,
+    code: null,
+    retryable: true,
+  });
+  expect(failure).toMatchObject({
+    class: "usage_limit",
+    code: "quota_router_exhausted",
+    retryable: false,
+    resetAt: "2026-11-13T15:00:00.000Z",
+  });
+  expect(failure.message).toContain("gpt-6.1-sol (codex)");
+  const other = {
+    class: "provider_error" as const,
+    message: "429 rate limited",
+    code: null,
+    retryable: true,
+  };
+  expect(UsageLimitSources.classifyQuotaRouterFailure(other)).toBe(other);
+});

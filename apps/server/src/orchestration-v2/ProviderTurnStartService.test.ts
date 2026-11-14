@@ -58,6 +58,7 @@ import * as ProjectionStore from "./ProjectionStore.ts";
 import * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
 import * as ProviderSessionManager from "./ProviderSessionManager.ts";
 import * as ProviderTurnStart from "./ProviderTurnStartService.ts";
+import * as UsageLimitSources from "../usage/UsageLimitSources.ts";
 import * as RunExecutionService from "./RunExecutionService.ts";
 import * as ProviderUsageAnalytics from "../telemetry/ProviderUsageAnalytics.ts";
 import * as RuntimePolicy from "./RuntimePolicy.ts";
@@ -88,6 +89,7 @@ function startWithMissingWorktree(
     [managedWorktreesDir]: managedWorktreesDir,
     [`${managedWorktreesDir}/project`]: `${managedWorktreesDir}/project`,
   },
+  preempted: UsageLimitSources.PreemptiveUsageLimit | null = null,
 ) {
   const threadId = ThreadId.make("thread_provider_turn_start_projection_failure");
   const runId = RunId.make("run_provider_turn_start_projection_failure");
@@ -120,6 +122,8 @@ function startWithMissingWorktree(
         providerThreadId,
         userMessageId: messageId,
         ordinal: 2,
+        providerInstanceId: "codex",
+        modelSelection: { instanceId: "codex", model: "gpt-6.1-sol" },
       },
     ],
     nodes: [{ id: rootNodeId, checkpointScopeId }],
@@ -202,14 +206,20 @@ function startWithMissingWorktree(
         }),
         Layer.mock(RunExecutionService.RunExecutionServiceV2)({ startRootRun }),
         Layer.mock(RuntimePolicy.RuntimePolicyV2)({}),
+        Layer.succeed(UsageLimitSources.UsageLimitPreemption, {
+          check: () => Effect.succeed(preempted),
+        }),
       ),
     ),
   );
 
   const start = Effect.gen(function* () {
-    return yield* (yield* ProviderTurnStart.ProviderTurnStartServiceV2)
-      .start({ threadId, runId, willRetry: true })
-      .pipe(Effect.flip);
+    const started = (yield* ProviderTurnStart.ProviderTurnStartServiceV2).start({
+      threadId,
+      runId,
+      willRetry: true,
+    });
+    return preempted === null ? yield* Effect.flip(started) : yield* started;
   }).pipe(Effect.provide(layer), Effect.runPromise);
   return {
     start,
@@ -274,6 +284,35 @@ it.each([
   const harness = startWithMissingWorktree(input.worktreePath, input.realPaths);
   await harness.start;
   expect(harness.createWorktree).toHaveBeenCalledTimes(input.recreated ? 1 : 0);
+});
+
+it("holds a turn back as limited when its quota is known to be spent", async () => {
+  const harness = startWithMissingWorktree(
+    `${managedWorktreesDir}/project/feature-restore`,
+    undefined,
+    { resetAt: "2026-11-14T12:00:00.000Z", source: "hub" },
+  );
+  await harness.start;
+  expect(harness.createWorktree).not.toHaveBeenCalled();
+  expect(harness.startRootRun).not.toHaveBeenCalled();
+  const written = (
+    harness.writeIfRunCurrent.mock.calls as unknown as Array<
+      [{ readonly events: ReadonlyArray<OrchestrationV2DomainEvent> }]
+    >
+  )[0]![0].events;
+  const failure = written.flatMap((event) =>
+    event.type === "turn-item.updated" && event.payload.type === "error"
+      ? [event.payload.failure]
+      : [],
+  )[0];
+  expect(failure).toMatchObject({
+    class: "usage_limit",
+    code: "usage_limit_preempted",
+    resetAt: "2026-11-14T12:00:00.000Z",
+  });
+  expect(written.find((event) => event.type === "run.updated")?.payload).toMatchObject({
+    status: "failed",
+  });
 });
 
 const restoreLeaseExists = vi.fn(() => Effect.succeed(false));

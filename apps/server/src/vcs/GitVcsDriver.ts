@@ -45,6 +45,7 @@ import {
 import * as CheckoutCloner from "./CheckoutCloner.ts";
 import * as VcsDriver from "./VcsDriver.ts";
 import * as VcsProcess from "./VcsProcess.ts";
+import type { WorktreeOccupant } from "./worktreeOccupants.ts";
 
 export interface ExecuteGitInput {
   readonly operation: string;
@@ -441,6 +442,10 @@ export class GitVcsDriver extends Context.Service<
     readonly removeWorktree: (
       input: VcsRemoveWorktreeInput,
     ) => Effect.Effect<void, GitCommandError>;
+    /** Processes running from inside a folder; null when the platform could not be read. */
+    readonly worktreeOccupants: (
+      worktreePath: string,
+    ) => Effect.Effect<ReadonlyArray<WorktreeOccupant> | null>;
     readonly pruneWorktrees: (input: {
       readonly cwd: string;
     }) => Effect.Effect<void, GitCommandError>;

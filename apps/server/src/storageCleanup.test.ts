@@ -25,6 +25,7 @@ import * as HostProcess from "@t3tools/shared/HostProcess";
 import * as ServerConfig from "./config.ts";
 import * as StorageCleanup from "./storageCleanup.ts";
 import * as GitVcsDriver from "./vcs/GitVcsDriver.ts";
+import type { WorktreeOccupant } from "./vcs/worktreeOccupants.ts";
 import * as GitManager from "./git/GitManager.ts";
 import * as Settings from "./serverSettings.ts";
 import * as ProjectionStore from "./orchestration-v2/ProjectionStore.ts";
@@ -244,7 +245,11 @@ describe("V2 storage cleanup eligibility", () => {
             limitRecovery: armed ? { runId, resetAt, autoResume, snooze } : null,
           },
           NOW_MS,
-          { autoResumeLimitedThreads: autoResumeSetting, snoozeLimitedThreads: !settingsOff },
+          {
+            autoResumeLimitedThreads: autoResumeSetting,
+            snoozeLimitedThreads: !settingsOff,
+            usageLimitRouting: DEFAULT_SERVER_SETTINGS.usageLimitRouting,
+          },
         ),
       ).toBe(idle);
     },
@@ -352,6 +357,7 @@ const cleanupFixture = (
     let storedWorktreePaths: string[] = [worktree];
     let projectRoots = [repo];
     let editBeforeRemoval = false;
+    let occupants: ReadonlyArray<WorktreeOccupant> | null = [];
     let openSessionCwd: string | null = null;
     let sessionLive = true;
     let sessionLiveChecks = 0;
@@ -364,9 +370,13 @@ const cleanupFixture = (
     let terminalListener: ((event: TerminalMetadataStreamEvent) => Effect.Effect<void>) | undefined;
     let events: Stream.Stream<OrchestrationV2DomainEvent> = Stream.empty;
     const activated = yield* Deferred.make<void>();
+    const gitWithOccupants: GitVcsDriver.GitVcsDriver["Service"] = {
+      ...git,
+      worktreeOccupants: () => Effect.sync(() => occupants),
+    };
     const context = yield* Layer.build(StorageCleanup.layer).pipe(
       Effect.provideService(GitVcsDriver.GitVcsDriver, {
-        ...git,
+        ...gitWithOccupants,
         execute: (input) =>
           Effect.gen(function* () {
             gitInspections++;
@@ -493,6 +503,9 @@ const cleanupFixture = (
         terminalListener?.({ type: "snapshot", terminals }) ?? Effect.void,
       editBeforeRemoval: () => {
         editBeforeRemoval = true;
+      },
+      setOccupants: (next: ReadonlyArray<WorktreeOccupant> | null) => {
+        occupants = next;
       },
       fs,
       worktree,
@@ -3168,6 +3181,8 @@ describe("storage cleanup reports and local file policies", () => {
         yield* fs.symlink("tracked.txt", `${worktree}/link`);
         yield* command(worktree, ["add", "link"]);
         yield* command(worktree, ["commit", "-m", "link"]);
+        // Another branch holds the commit, so only the flagged link decides.
+        yield* command(worktree, ["branch", "link-landed"]);
         yield* command(worktree, ["update-index", "--assume-unchanged", "link"]);
         yield* fs.remove(`${worktree}/link`);
         // Without core.symlinks, Git checks a link out as a regular file holding its target.
@@ -3390,6 +3405,58 @@ describe("settled worktree rechecks", () => {
       ),
   );
 });
+
+it.effect.each([
+  {
+    name: "a commit no other branch has",
+    arrange: (fixture: Effect.Success<ReturnType<typeof cleanupFixture>>) =>
+      Effect.gen(function* () {
+        yield* fixture.fs.writeFileString(`${fixture.worktree}/tracked.txt`, "landed nowhere\n");
+        yield* fixture.command(fixture.worktree, ["commit", "-am", "local only"]);
+      }),
+    reason: /^Has commits no other branch has \([0-9a-f]{12}\)/,
+  },
+  {
+    name: "uncommitted changes",
+    arrange: (fixture: Effect.Success<ReturnType<typeof cleanupFixture>>) =>
+      fixture.fs.writeFileString(`${fixture.worktree}/tracked.txt`, "not committed\n"),
+    reason: /^Has uncommitted changes \(1 file\)/,
+  },
+  {
+    name: "a process running inside it",
+    arrange: (fixture: Effect.Success<ReturnType<typeof cleanupFixture>>) =>
+      Effect.sync(() =>
+        fixture.setOccupants([
+          { pid: 4242, name: "node", via: "working directory", path: fixture.worktree },
+        ]),
+      ),
+    reason: /^A process runs from inside it \(pid 4242 node\)/,
+  },
+  {
+    name: "processes that could not be checked",
+    arrange: (fixture: Effect.Success<ReturnType<typeof cleanupFixture>>) =>
+      Effect.sync(() => fixture.setOccupants(null)),
+    reason: /^Running processes could not be checked/,
+  },
+])("never cleans a settled worktree with $name", ({ arrange, reason }) =>
+  runCleanupTest(
+    Effect.gen(function* () {
+      yield* TestClock.setTime(NOW_MS);
+      const fixture = yield* cleanupFixture();
+      fixture.setSettings({
+        storageCleanup: { ...DEFAULT_SERVER_SETTINGS.storageCleanup, worktreeSettledAfterDays: 0 },
+      });
+      fixture.setThreads([
+        shell({ branch: "feature", worktreePath: fixture.worktree, settledAt: at(0) }),
+      ]);
+      yield* arrange(fixture);
+      const report = yield* fixture.service.runNow;
+      expect(report.counts.removed).toBe(0);
+      expect(report.entries.find((entry) => entry.kind === "worktree")?.reason).toMatch(reason);
+      expect(yield* fixture.fs.exists(fixture.worktree)).toBe(true);
+    }),
+  ),
+);
 
 it.effect("keeps saved usage data when removing a settled checkout", () =>
   runCleanupTest(

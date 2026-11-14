@@ -30,6 +30,7 @@ import * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter"
 import * as ProviderAdapterRegistry from "../orchestration-v2/ProviderAdapterRegistry.ts";
 import * as ThreadLaunchService from "../orchestration-v2/ThreadLaunchService.ts";
 import * as UsageLimitRecoveryWorker from "../orchestration-v2/UsageLimitRecoveryWorker.ts";
+import * as UsageLimitSources from "../usage/UsageLimitSources.ts";
 import * as GitVcsDriver from "../vcs/GitVcsDriver.ts";
 import * as ThreadManagementService from "../orchestration-v2/ThreadManagementService.ts";
 import * as ServerSettings from "../serverSettings.ts";
@@ -168,6 +169,7 @@ it.effect.each([
             }),
             ProjectionStore.layer.pipe(Layer.provide(SqlitePersistence.layerMemory)),
             ServerSettings.layerTest({ autoResumeLimitedThreads: true }),
+            Layer.mock(UsageLimitSources.UsageLimitSources)({ current: Effect.succeed([]) }),
           ),
         ),
       );

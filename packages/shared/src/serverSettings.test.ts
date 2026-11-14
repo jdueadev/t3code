@@ -91,6 +91,27 @@ describe("fallbackTextGenerationModelSelection", () => {
 });
 
 describe("serverSettings helpers", () => {
+  it("replaces a usage limit list whole, so it can shrink, and keeps the other fields", () => {
+    const fallback = { instanceId: ProviderInstanceId.make("codex"), model: "gpt-6.1-luna" };
+    const two = applyServerSettingsPatch(DEFAULT_SERVER_SETTINGS, {
+      usageLimitRouting: {
+        onLimit: "auto-route",
+        fallbacks: [
+          { match: "codex", fallbacks: [fallback] },
+          { match: "claudeAgent", fallbacks: [fallback] },
+        ],
+      },
+    });
+    const one = applyServerSettingsPatch(two, {
+      usageLimitRouting: { fallbacks: [{ match: "codex", fallbacks: [fallback] }] },
+    });
+    expect(one.usageLimitRouting).toEqual({
+      ...DEFAULT_SERVER_SETTINGS.usageLimitRouting,
+      onLimit: "auto-route",
+      fallbacks: [{ match: "codex", fallbacks: [fallback] }],
+    });
+  });
+
   it("translates a shipped client's idle compaction switch into a mode", () => {
     const off = applyServerSettingsPatch(DEFAULT_SERVER_SETTINGS, { idleCompaction: "off" });
     expect([off.idleCompaction, off.compactIdleThreads]).toEqual(["off", false]);

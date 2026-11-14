@@ -25,6 +25,7 @@ import {
   SidebarProjectSortOrder,
   ScreenReaderAnnouncements,
   ToolCallVisibility,
+  type UsageLimitAction,
 } from "@t3tools/contracts/settings";
 import { desktopUpdateChannelOf } from "@t3tools/shared/cliRelease";
 import { createModelSelection } from "@t3tools/shared/model";
@@ -126,6 +127,12 @@ import { downloadLocalUpdate } from "../sidebar/SidebarUpdatePill";
 import { useUpdateEverythingRun } from "../sidebar/updateEverythingRun";
 import { awaitsTrackSwitch, channelSwitchLabel } from "../sidebar/updateEverything.logic";
 import { isHostedByThisApp } from "../sidebar/useUpdateEverything";
+
+const USAGE_LIMIT_ACTION_LABELS: Record<UsageLimitAction, string> = {
+  ask: "Ask",
+  wait: "Wait for reset",
+  "auto-route": "Switch model",
+};
 
 const RESPONSE_STREAMING_MODE_LABELS: Record<ResponseStreamingMode, string> = {
   turn: "Wait for the full response",
@@ -1877,6 +1884,33 @@ export function ThreadsSettingsPanel() {
               }
               aria-label="Snooze until limits reset"
             />
+          }
+        />
+        <SettingsRow
+          serverScoped
+          {...searchableSetting("on-usage-limit")}
+          description="When a model is out of quota: Ask stops, Wait resumes at the reset, Switch model continues on your first fallback with quota. Local models never switch to a remote provider you did not allow."
+          settingKeys={["usageLimitRouting"]}
+          control={
+            <Select
+              value={settings.usageLimitRouting.onLimit}
+              onValueChange={(value) =>
+                updateSettings({ usageLimitRouting: { onLimit: value as UsageLimitAction } })
+              }
+            >
+              <SelectTrigger size="sm" className="w-full sm:w-40" aria-label="On usage limit">
+                <SelectValue>
+                  {USAGE_LIMIT_ACTION_LABELS[settings.usageLimitRouting.onLimit]}
+                </SelectValue>
+              </SelectTrigger>
+              <SelectPopup align="end" alignItemWithTrigger={false}>
+                {(Object.keys(USAGE_LIMIT_ACTION_LABELS) as UsageLimitAction[]).map((action) => (
+                  <SelectItem hideIndicator key={action} value={action}>
+                    {USAGE_LIMIT_ACTION_LABELS[action]}
+                  </SelectItem>
+                ))}
+              </SelectPopup>
+            </Select>
           }
         />
       </SettingsSection>

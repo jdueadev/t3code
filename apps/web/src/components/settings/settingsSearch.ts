@@ -460,6 +460,12 @@ export const SETTINGS_SEARCH_ITEMS = [
     searchTerms: ["usage quota rate limit reset recover continue"],
   },
   {
+    id: "on-usage-limit",
+    title: "On usage limit",
+    to: "/settings/threads",
+    searchTerms: ["usage quota limit fallback model switch route provider wait ask cooldown"],
+  },
+  {
     id: "working-shelf",
     title: msg("Working section"),
     to: "/settings/general",
