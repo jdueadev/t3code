@@ -958,8 +958,8 @@ interface ActiveCursorTurn {
   readonly assistant: ActiveCursorTextStream;
   assistantReply: CursorTransportFailure;
   readonly reasoning: ActiveCursorTextStream;
-  /** The user text this run sent, before runtime instructions; absent for /compress. */
-  readonly prompt: string | undefined;
+  /** The user text this run sent and took as steers, before runtime instructions; absent for /compress. */
+  prompt: string | undefined;
   interrupted: boolean;
   finalized: boolean;
   /** The agent's latest turn ended and no new work has started since. */
@@ -2876,6 +2876,9 @@ export const makeCursorAdapterV2 = Effect.fn("makeCursorAdapterV2")(function* (
                   ? "revert_to_followup"
                   : yield* context.run.steer(text);
               if (outcome === "complete_delivered") {
+                // A cancelled run drops its steers too, so the replacement run must carry them.
+                context.prompt =
+                  context.prompt === undefined ? text : `${context.prompt}\n\n${text}`;
                 return;
               }
               if (context.interrupted) {
