@@ -425,6 +425,7 @@ const stackLayer = (number: number) => ({
  */
 function makeGrowingStack() {
   let layers = [stackLayer(18), stackLayer(20)];
+  let dissolved = false;
   const entries = new Map<number, { readonly layers: typeof layers; expiresAt: number }>();
   const invalidated: Array<number> = [];
   const stackOf = (stackLayers: typeof layers): PullRequestStack => ({
@@ -439,7 +440,10 @@ function makeGrowingStack() {
     grow: () => {
       layers = [...layers, stackLayer(83)];
     },
-    read: () => Effect.sync(() => stackOf(layers)),
+    dissolve: () => {
+      dissolved = true;
+    },
+    read: () => Effect.sync(() => (dissolved ? null : stackOf(layers))),
     invalidate: (({ reference }) =>
       Effect.sync(() => {
         invalidated.push(reference?.number ?? -1);
@@ -1512,6 +1516,41 @@ describe("PullRequestSyncReactor", () => {
           (yield* Ref.get(fixture.stackCalls)).length,
           readsBeforeGrowth + readsAfterGrowth.length,
         );
+      }).pipe(Effect.provide(fixture.layer));
+    }),
+  );
+
+  it.effect("re-reads a settled thread's other layers once a stack is dissolved", () =>
+    Effect.gen(function* () {
+      yield* TestClock.setTime(Date.parse(NOW));
+      const stack = makeGrowingStack();
+      const fixture = yield* makeHarness({
+        snapshot: makeSnapshot([makeThread("one", { pullRequests: [makeLink(18), makeLink(20)] })]),
+        stack: stack.read,
+      });
+
+      yield* Effect.gen(function* () {
+        const reactor = yield* startAndSweep(fixture);
+        yield* applyRecordedSyncs(fixture);
+        yield* Ref.update(fixture.snapshots, (snapshot) => ({
+          ...snapshot,
+          threads: snapshot.threads.map((thread) => ({
+            ...thread,
+            settledOverride: "settled" as const,
+            settledAt: "2026-08-21T00:00:00.000Z",
+          })),
+        }));
+
+        // Only #18 is asked to resync, as when another environment unstacked it.
+        stack.dissolve();
+        yield* requestAndApply(fixture, reactor, 18);
+        yield* sweepAgain(fixture, reactor);
+        yield* applyRecordedSyncs(fixture);
+
+        assert.deepStrictEqual(yield* storedStackLayers(fixture), [
+          [18, undefined],
+          [20, undefined],
+        ]);
       }).pipe(Effect.provide(fixture.layer));
     }),
   );

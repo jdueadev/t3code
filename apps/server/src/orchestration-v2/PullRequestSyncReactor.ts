@@ -598,22 +598,34 @@ export const make = Effect.gen(function* () {
         const fetched = fetchedStack.stack;
         stacksReadThisSweep.set(key, fetched);
         // New upper layers leave older members' fields unchanged; differing layer lists need a stack read.
+        // A member that left its stack, or whose stack dissolved, leaves the old layers to re-read too.
         // Only flag siblings in the same project: different credentials can yield lists that never agree.
-        if (fetched !== null) {
-          const fetchedKey = nativeStackKeyOf(first.link, fetched);
+        const fetchedKey = fetched === null ? null : nativeStackKeyOf(first.link, fetched);
+        const leftKeys = new Set(
+          entries.flatMap(({ link }) =>
+            link.stack === null || nativeStackKeyOf(link, link.stack) === fetchedKey
+              ? []
+              : [nativeStackKeyOf(link, link.stack)],
+          ),
+        );
+        if (fetched !== null || leftKeys.size > 0) {
           for (const [siblingKey, siblingEntries] of groups) {
             if (siblingKey === key) continue;
             if (siblingEntries[0]!.thread.projectId !== first.thread.projectId) continue;
             const readThisSweep = stacksReadThisSweep.get(siblingKey);
-            const stale = siblingEntries.some(({ link }) => {
+            let stale = false;
+            let left = false;
+            for (const { link } of siblingEntries) {
               const stack = readThisSweep === undefined ? link.stack : readThisSweep;
-              return (
-                stack !== null &&
-                nativeStackKeyOf(link, stack) === fetchedKey &&
-                !sameLayerNumbers(stack, fetched)
-              );
-            });
-            if (stale) retryStacks.add(siblingKey);
+              if (stack === null) continue;
+              const stackKey = nativeStackKeyOf(link, stack);
+              if (fetched !== null && stackKey === fetchedKey)
+                stale ||= !sameLayerNumbers(stack, fetched);
+              else left ||= leftKeys.has(stackKey);
+            }
+            if (stale || left) retryStacks.add(siblingKey);
+            // Settled threads skip stack retries; a request reaches them too.
+            if (left) requested.add(siblingKey);
           }
         }
       }
