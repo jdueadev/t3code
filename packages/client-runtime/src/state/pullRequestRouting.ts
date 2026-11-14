@@ -2,6 +2,7 @@ import {
   WS_METHODS,
   PullRequestRef,
   PullRequestInvalidateInput,
+  PullRequestStackEditInput,
   PullRequestStackEditResult,
   PullRequestState,
   type EnvironmentId,
@@ -68,6 +69,7 @@ const hasState = Schema.is(
 );
 const isInvalidation = Schema.is(PullRequestInvalidateInput);
 const isStackEditResult = Schema.is(PullRequestStackEditResult);
+const isStackEditInput = Schema.is(PullRequestStackEditInput);
 const readTimeout = (environmentId: EnvironmentId) =>
   Effect.timeoutOrElse({
     duration: "30 seconds",
@@ -289,10 +291,16 @@ export function createPullRequestRouter() {
     const invalidateReaders = (result?: unknown) =>
       Effect.suspend(() => {
         if (!writes.has(tag) || used.size === 0) return Effect.void;
-        const layers =
-          tag === WS_METHODS.pullRequestsEditStack && isStackEditResult(result)
-            ? result.affected.filter((number) => number !== ref.number)
-            : [];
+        // A failed edit may still have applied, so the layers the input names are resynced too.
+        const named =
+          tag !== WS_METHODS.pullRequestsEditStack
+            ? []
+            : isStackEditResult(result)
+              ? result.affected
+              : isStackEditInput(input) && input.edit.kind === "link"
+                ? input.edit.numbers
+                : [];
+        const layers = [...new Set(named)].filter((number) => number !== ref.number);
         const withLayers = (reference: PullRequestRef) => [
           reference,
           ...layers.map((number) => ({ ...reference, number })),
@@ -303,18 +311,20 @@ export function createPullRequestRouter() {
         for (const entry of used.values()) {
           if (
             entry.origin !== origin.target.environmentId ||
-            !matchesReference(entry.reference, ref)
+            ![ref.number, ...layers].some((number) =>
+              matchesReference(entry.reference, { ...ref, number }),
+            )
           )
             continue;
+          const reference = { ...entry.reference, number: ref.number };
           for (const target of [...entry.targets, origin.target.environmentId]) {
             const refs = targets.get(target) ?? [];
             if (
               !refs.some(
-                (existing) =>
-                  existing.host === entry.reference.host && existing.number === ref.number,
+                (existing) => existing.host === reference.host && existing.number === ref.number,
               )
             )
-              refs.push(...withLayers(entry.reference));
+              refs.push(...withLayers(reference));
             targets.set(target, refs);
           }
         }
@@ -331,10 +341,14 @@ export function createPullRequestRouter() {
           { concurrency: 4, discard: true },
         );
       });
-    // A failed viewed-files batch may have applied some paths. Other writes invalidate on success.
+    // A failed viewed-files batch or stack edit may have applied. Other writes invalidate on success.
     const finish = (operation: ReturnType<typeof request<T>>) =>
-      tag === WS_METHODS.pullRequestsSetFilesViewed
-        ? operation.pipe(Effect.ensuring(invalidateReaders()))
+      tag === WS_METHODS.pullRequestsSetFilesViewed || tag === WS_METHODS.pullRequestsEditStack
+        ? operation.pipe(
+            Effect.onExit((exit) =>
+              invalidateReaders(Exit.isSuccess(exit) ? exit.value : undefined),
+            ),
+          )
         : operation.pipe(Effect.tap((result) => invalidateReaders(result)));
     const alternatives = [];
     for (const [id, entry] of entries) {
