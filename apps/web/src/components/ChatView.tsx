@@ -207,7 +207,9 @@ import { cn } from "~/lib/utils";
 import { COLLAPSED_SIDEBAR_TITLEBAR_INSET_CLASS } from "~/workspaceTitlebar";
 import { toastManager } from "./ui/toast";
 import { projectScriptIdFromCommand } from "~/projectScripts";
-import { newMessageId } from "~/lib/utils";
+import { newMessageId, randomUUID } from "~/lib/utils";
+import { hasUncommittedThreadWork } from "@t3tools/shared/git";
+import { useGitStackedAction } from "../state/sourceControlActions";
 import { isInSideChatPane, type SideChatParentPanel } from "~/lib/sideChatPane";
 import {
   NO_PROVIDER_MODEL_SELECTION,
@@ -375,7 +377,11 @@ import { ThreadVisitWatermark } from "./chat/ThreadVisitWatermark";
 import { ChatTerminalDrawers } from "./chat/ChatTerminalDrawers";
 import { ChatRightPanel } from "./chat/ChatRightPanel";
 import { useDraftEnvironmentRouting } from "./chat/useDraftEnvironmentRouting";
-import { branchMismatchBannerItem, extensionStatusBannerItem } from "./chat/ThreadActivityBanners";
+import {
+  branchMismatchBannerItem,
+  extensionStatusBannerItem,
+  threadWorktreeCommitBannerItem,
+} from "./chat/ThreadActivityBanners";
 import { ThreadNow } from "./chat/ThreadNow";
 import type { ThreadStructure } from "@t3tools/client-runtime/state/shell";
 import { useDelayedStatus } from "../hooks/useDelayedStatus";
@@ -2568,6 +2574,54 @@ export default function ChatView(props: ChatViewProps) {
     void handleSwitchCheckoutToThread();
   };
   const handleRestoreThreadBranchStable = useStableCallback(handleRestoreThreadBranch);
+  const threadWorktreePath = activeThread?.worktreePath ?? null;
+  const threadWorktreeCommit = useGitStackedAction({ environmentId, cwd: threadWorktreePath });
+  const [pendingThreadCommit, setPendingThreadCommit] = useState<
+    "commit" | "commit_push_pr" | null
+  >(null);
+  const [dismissedCommitOfferKey, setDismissedCommitOfferKey] = useState<string | null>(null);
+  const commitOfferKey = `${routeThreadKey}:${activeThread?.latestRun?.runId ?? ""}`;
+  const threadCommitBranch = activeThread?.branch ?? null;
+  const showThreadCommitOffer =
+    isServerThread &&
+    threadCommitBranch !== null &&
+    dismissedCommitOfferKey !== commitOfferKey &&
+    (pendingThreadCommit !== null ||
+      hasUncommittedThreadWork({
+        worktreePath: threadWorktreePath,
+        threadBranch: threadCommitBranch,
+        runActive: isWorking,
+        status: gitStatusQuery.data,
+      }));
+  const runThreadWorktreeCommit = async (action: "commit" | "commit_push_pr") => {
+    if (!activeThread || pendingThreadCommit !== null) return;
+    setPendingThreadCommit(action);
+    try {
+      const result = await threadWorktreeCommit.run({
+        actionId: randomUUID(),
+        action,
+        threadId: activeThread.id,
+      });
+      if (result._tag === "Failure") {
+        if (isAtomCommandInterrupted(result)) return;
+        const error = squashAtomCommandFailure(result);
+        toastManager.add({
+          type: "error",
+          title: action === "commit" ? "Could not commit" : "Could not open a pull request",
+          description: error instanceof Error ? error.message : "An error occurred.",
+        });
+        return;
+      }
+      const { toast } = result.value;
+      toastManager.add({
+        type: "success",
+        title: toast.title,
+        ...(toast.description === undefined ? {} : { description: toast.description }),
+      });
+    } finally {
+      setPendingThreadCommit(null);
+    }
+  };
   const feedbackBannerItems = feedbackSubmissions.flatMap((submission) => {
     const item = feedbackBannerItem(submission, () => {
       setFeedbackSubmissionsByThreadKey((current) => ({
@@ -2653,6 +2707,20 @@ export default function ChatView(props: ChatViewProps) {
     const extensionStatusItems = extensionStatusBanner === null ? [] : [extensionStatusBanner];
     const usageLimitsItems = usageLimitsBanner === null ? [] : [usageLimitsBanner];
     const projectCloneItems = projectCloneBannerItem === null ? [] : [projectCloneBannerItem];
+    const threadCommitItems =
+      showThreadCommitOffer && threadCommitBranch !== null
+        ? [
+            threadWorktreeCommitBannerItem({
+              offerKey: commitOfferKey,
+              branch: threadCommitBranch,
+              disabled: !canWriteSourceControl,
+              pendingAction: pendingThreadCommit,
+              onCommit: () => void runThreadWorktreeCommit("commit"),
+              onCommitAndOpenPr: () => void runThreadWorktreeCommit("commit_push_pr"),
+              onDismiss: () => setDismissedCommitOfferKey(commitOfferKey),
+            }),
+          ]
+        : [];
     // An approval's feedback goes to that approval; the armed session waits for the next message.
     const freshSessionItems =
       freshSessionAvailable && freshSessionArmed && activePendingApproval === null
@@ -2666,6 +2734,7 @@ export default function ChatView(props: ChatViewProps) {
         ...extensionStatusItems,
         ...usageLimitsItems,
         ...projectCloneItems,
+        ...threadCommitItems,
         ...freshSessionItems,
         ...systemComposerBannerItems,
       ];
@@ -2677,6 +2746,7 @@ export default function ChatView(props: ChatViewProps) {
       ...extensionStatusItems,
       ...usageLimitsItems,
       ...projectCloneItems,
+      ...threadCommitItems,
       ...freshSessionItems,
       ...systemComposerBannerItems,
       branchMismatchBannerItem({
