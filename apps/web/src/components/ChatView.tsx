@@ -352,6 +352,7 @@ import {
 import {
   buildLocalDraftThread,
   deriveCommittedServerUserMessageIds,
+  deriveTimelineWorking,
   dismissBranchMismatchForSession,
   shouldRenderPreviewMiniPlayer,
   deriveLockedProvider,
@@ -362,6 +363,7 @@ import {
   startNewThreadForProject,
   codexArtifactTemplatePromptToAppend,
   shouldRefocusComposerOnWindowFocus,
+  hasCompactableConversation,
 } from "./ChatView.logic";
 import { useLocalStorage } from "~/hooks/useLocalStorage";
 import { useComposerHandleContext } from "../composerHandleContext";
@@ -1501,8 +1503,12 @@ export default function ChatView(props: ChatViewProps) {
     run: serverProjection?.runs.find((run) => run.id === activeRuntime?.activeRunId),
     messages: serverProjection?.messages,
   });
-  const isWorking =
-    phase === "running" || isSendBusy || isCompacting || runlessWorkStartedAt !== null;
+  const isWorking = deriveTimelineWorking({
+    phase,
+    isSendBusy,
+    isCompacting,
+    runlessWorkStartedAt,
+  });
   const activeContextWindow = deriveLatestContextWindowSnapshot(
     serverVisibleTurnItems ?? [],
     activeThreadLiveTokenUsage,
@@ -2486,11 +2492,11 @@ export default function ChatView(props: ChatViewProps) {
     scrollToEnd,
     persistThreadSettingsForNextTurn,
   });
-  const activeThreadHasCompactableConversation = serverVisibleTurnItems.some(
-    ({ item }) =>
-      item.type === "user_message" &&
-      (item.text.trim().toLowerCase() !== "/compact" || item.attachments.length > 0),
-  );
+  const activeThreadHasCompactableConversation = hasCompactableConversation({
+    visibleTurnItems: serverVisibleTurnItems,
+    hasMoreHistory: serverThreadHistory.hasMoreHistory,
+    latestUserMessageAt: serverThread?.latestUserMessageAt ?? null,
+  });
   const pendingHandoffSelection =
     (composerModelSelectionApplies ? composerSelectedModelSelection : null) ??
     activeThread?.modelSelection;
