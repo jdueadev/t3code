@@ -966,6 +966,7 @@ it.effect(
 it.effect("resyncs every stack layer a routed edit touched, even when the edit fails", () =>
   Effect.gen(function* () {
     let editFails = false;
+    const edits: string[] = [];
     const invalidations: { environment: string; input: unknown }[] = [];
     const clientFor = (local: boolean) => {
       const environment = local ? "local" : "origin";
@@ -978,11 +979,16 @@ it.effect("resyncs every stack layer a routed edit touched, even when the edit f
             accountId: "123",
           }),
         [WS_METHODS.pullRequestsSummary]: () => (local ? Effect.succeed(null) : Effect.never),
-        [WS_METHODS.serverGetConfig]: () => Effect.succeed({ environment: { capabilities: {} } }),
+        [WS_METHODS.serverGetConfig]: () =>
+          Effect.succeed({ environment: { capabilities: { pullRequestStackEdits: true } } }),
         [WS_METHODS.pullRequestsEditStack]: () =>
-          editFails
-            ? Effect.fail(new MutationRefused())
-            : Effect.succeed({ stack: null, affected: [7, 8, 9] }),
+          Effect.sync(() => edits.push(environment)).pipe(
+            Effect.andThen(
+              editFails
+                ? Effect.fail(new MutationRefused())
+                : Effect.succeed({ stack: null, affected: [7, 8, 9] }),
+            ),
+          ),
         [WS_METHODS.pullRequestsInvalidate]: (input: unknown) =>
           Effect.sync(() => {
             invalidations.push({ environment, input });
@@ -1005,15 +1011,16 @@ it.effect("resyncs every stack layer a routed edit touched, even when the edit f
           (entry.input.reference as { number: number }).number === number,
       );
     yield* Effect.gen(function* () {
-      // The first routed operation is an edit that fails, so no read has been recorded yet.
+      // The first routed operation is an unstack the other environment applies and then fails.
       editFails = true;
       yield* Effect.exit(
         route(WS_METHODS.pullRequestsEditStack, {
           ...reference,
-          edit: { kind: "link", numbers: [7, 8, 9] },
+          edit: { kind: "unstack", stackNumber: 50 },
         }),
       );
-      for (const number of [7, 8, 9]) expect(layerReached("origin", number)).toBe(true);
+      expect(edits).toEqual(["local"]);
+      expect(layerReached("origin", 7)).toBe(true);
       editFails = false;
 
       // Only #8 was read through the local environment; the edit is made from #7.
@@ -1026,6 +1033,7 @@ it.effect("resyncs every stack layer a routed edit touched, even when the edit f
       expect(layerReached("local", 8)).toBe(true);
 
       invalidations.length = 0;
+      edits.length = 0;
       editFails = true;
       yield* Effect.exit(
         route(WS_METHODS.pullRequestsEditStack, {
@@ -1033,6 +1041,7 @@ it.effect("resyncs every stack layer a routed edit touched, even when the edit f
           edit: { kind: "link", numbers: [7, 8, 9] },
         }),
       );
+      expect(edits).toEqual(["local"]);
       for (const number of [7, 8, 9]) expect(layerReached("origin", number)).toBe(true);
     }).pipe(
       Effect.provideService(EnvironmentRegistry.EnvironmentRegistry, environmentRegistry),
