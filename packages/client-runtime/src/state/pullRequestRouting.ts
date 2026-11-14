@@ -290,7 +290,9 @@ export function createPullRequestRouter() {
     // Each layer's reference reaches the origin, whose invalidate handler resyncs its saved link.
     const invalidateReaders = (result?: unknown) =>
       Effect.suspend(() => {
-        if (!writes.has(tag) || used.size === 0) return Effect.void;
+        // A stack edit may have run elsewhere and failed before any read was recorded.
+        if (!writes.has(tag) || (used.size === 0 && tag !== WS_METHODS.pullRequestsEditStack))
+          return Effect.void;
         // A failed edit may still have applied, so the layers the input names are resynced too.
         const named =
           tag !== WS_METHODS.pullRequestsEditStack

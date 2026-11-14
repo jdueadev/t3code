@@ -1005,6 +1005,17 @@ it.effect("resyncs every stack layer a routed edit touched, even when the edit f
           (entry.input.reference as { number: number }).number === number,
       );
     yield* Effect.gen(function* () {
+      // The first routed operation is an edit that fails, so no read has been recorded yet.
+      editFails = true;
+      yield* Effect.exit(
+        route(WS_METHODS.pullRequestsEditStack, {
+          ...reference,
+          edit: { kind: "link", numbers: [7, 8, 9] },
+        }),
+      );
+      for (const number of [7, 8, 9]) expect(layerReached("origin", number)).toBe(true);
+      editFails = false;
+
       // Only #8 was read through the local environment; the edit is made from #7.
       yield* route(WS_METHODS.pullRequestsSummary, { ...reference, number: 8 });
       invalidations.length = 0;

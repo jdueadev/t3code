@@ -598,8 +598,9 @@ export const make = Effect.gen(function* () {
         const fetched = fetchedStack.stack;
         stacksReadThisSweep.set(key, fetched);
         // New upper layers leave older members' fields unchanged; differing layer lists need a stack read.
-        // A member that left its stack, or whose stack dissolved, leaves the old layers to re-read too.
-        // Only flag siblings in the same project: different credentials can yield lists that never agree.
+        // A member that left its stack, or whose stack dissolved, leaves the old layers to re-read too,
+        // in every project. Only compare layer lists within a project: different credentials can
+        // yield lists that never agree.
         const fetchedKey = fetched === null ? null : nativeStackKeyOf(first.link, fetched);
         const leftKeys = new Set(
           entries.flatMap(({ link }) =>
@@ -611,7 +612,7 @@ export const make = Effect.gen(function* () {
         if (fetched !== null || leftKeys.size > 0) {
           for (const [siblingKey, siblingEntries] of groups) {
             if (siblingKey === key) continue;
-            if (siblingEntries[0]!.thread.projectId !== first.thread.projectId) continue;
+            const sameProject = siblingEntries[0]!.thread.projectId === first.thread.projectId;
             const readThisSweep = stacksReadThisSweep.get(siblingKey);
             let stale = false;
             let left = false;
@@ -620,7 +621,7 @@ export const make = Effect.gen(function* () {
               if (stack === null) continue;
               const stackKey = nativeStackKeyOf(link, stack);
               if (fetched !== null && stackKey === fetchedKey)
-                stale ||= !sameLayerNumbers(stack, fetched);
+                stale ||= sameProject && !sameLayerNumbers(stack, fetched);
               else left ||= leftKeys.has(stackKey);
             }
             if (stale || left) retryStacks.add(siblingKey);

@@ -1520,39 +1520,49 @@ describe("PullRequestSyncReactor", () => {
     }),
   );
 
-  it.effect("re-reads a settled thread's other layers once a stack is dissolved", () =>
-    Effect.gen(function* () {
-      yield* TestClock.setTime(Date.parse(NOW));
-      const stack = makeGrowingStack();
-      const fixture = yield* makeHarness({
-        snapshot: makeSnapshot([makeThread("one", { pullRequests: [makeLink(18), makeLink(20)] })]),
-        stack: stack.read,
-      });
+  it.effect(
+    "re-reads settled threads' other layers, in any project, once a stack is dissolved",
+    () =>
+      Effect.gen(function* () {
+        yield* TestClock.setTime(Date.parse(NOW));
+        const stack = makeGrowingStack();
+        const fixture = yield* makeHarness({
+          snapshot: makeSnapshot([
+            makeThread("one", { pullRequests: [makeLink(18), makeLink(20)] }),
+            makeThread("two", {
+              projectId: ProjectId.make("second-project"),
+              pullRequests: [makeLink(20)],
+            }),
+          ]),
+          stack: stack.read,
+        });
 
-      yield* Effect.gen(function* () {
-        const reactor = yield* startAndSweep(fixture);
-        yield* applyRecordedSyncs(fixture);
-        yield* Ref.update(fixture.snapshots, (snapshot) => ({
-          ...snapshot,
-          threads: snapshot.threads.map((thread) => ({
-            ...thread,
-            settledOverride: "settled" as const,
-            settledAt: "2026-08-21T00:00:00.000Z",
-          })),
-        }));
+        yield* Effect.gen(function* () {
+          const reactor = yield* startAndSweep(fixture);
+          yield* applyRecordedSyncs(fixture);
+          yield* Ref.update(fixture.snapshots, (snapshot) => ({
+            ...snapshot,
+            threads: snapshot.threads.map((thread) => ({
+              ...thread,
+              settledOverride: "settled" as const,
+              settledAt: "2026-08-21T00:00:00.000Z",
+            })),
+          }));
 
-        // Only #18 is asked to resync, as when another environment unstacked it.
-        stack.dissolve();
-        yield* requestAndApply(fixture, reactor, 18);
-        yield* sweepAgain(fixture, reactor);
-        yield* applyRecordedSyncs(fixture);
+          // Only #18 is asked to resync, as when another environment unstacked it.
+          stack.dissolve();
+          yield* requestAndApply(fixture, reactor, 18);
+          yield* sweepAgain(fixture, reactor);
+          yield* applyRecordedSyncs(fixture);
 
-        assert.deepStrictEqual(yield* storedStackLayers(fixture), [
-          [18, undefined],
-          [20, undefined],
-        ]);
-      }).pipe(Effect.provide(fixture.layer));
-    }),
+          assert.deepStrictEqual(yield* storedStackLayers(fixture), [
+            [18, undefined],
+            [20, undefined],
+          ]);
+          const other = (yield* Ref.get(fixture.snapshots)).threads[1]!.pullRequests[0]!;
+          assert.strictEqual(other.stack, null);
+        }).pipe(Effect.provide(fixture.layer));
+      }),
   );
 
   it.effect("reads past the cache when a sibling flags a member during its summary read", () =>
